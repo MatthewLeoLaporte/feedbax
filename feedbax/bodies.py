@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
+import jax.tree as jt
 from jaxtyping import Array, PRNGKeyArray, PyTree
 
 from feedbax.channel import Channel, ChannelSpec, ChannelState
@@ -66,7 +67,7 @@ def _convert_feedback_spec(
         if all(isinstance(spec, Mapping) for spec in feedback_spec_flat):
             # Specs passed as a PyTree of mappings.
             # Assume it's only one level deep.
-            feedback_specs_flat = jax.tree_map(
+            feedback_specs_flat = jt.map(
                 lambda spec: ChannelSpec(**spec),
                 feedback_spec_flat,
                 is_leaf=lambda x: isinstance(x, Mapping),
@@ -152,7 +153,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
                 spec.where(example_mechanics_state)
             )
 
-        self.feedback_channels = MultiModel(jax.tree_map(
+        self.feedback_channels = MultiModel(jt.map(
             lambda spec: _build_feedback_channel(spec),
             feedback_specs,
             is_leaf=lambda x: isinstance(x, ChannelSpec),
@@ -176,7 +177,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
     # ) -> PyTree[ChannelState, 'T']:
     #     """Send current feedback states through channels, and return delayed feedback."""
     #     # TODO: separate keys for the different channels
-    #     return jax.tree_map(
+    #     return jt.map(
     #         lambda channel, spec, state: channel(spec.where(input), state, key=key),
     #         self.feedback_channels,
     #         self._feedback_specs,
@@ -193,7 +194,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
             {
                 "update_feedback": Stage(
                     callable=lambda self: self.feedback_channels,
-                    where_input=lambda input, state: jax.tree_map(
+                    where_input=lambda input, state: jt.map(
                         lambda spec: spec.where(state.mechanics),
                         self._feedback_specs,
                         is_leaf=lambda x: isinstance(x, ChannelSpec),
@@ -205,7 +206,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
                     where_input=lambda input, state: (
                         input,
                         # Get the output state for each feedback channel.
-                        jax.tree_map(
+                        jt.map(
                             lambda state: state.output,
                             state.feedback,
                             is_leaf=lambda x: isinstance(x, ChannelState),
@@ -262,7 +263,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
         return SimpleFeedbackState(
             mechanics=self.mechanics.memory_spec,
             net=self.net.memory_spec,
-            feedback=jax.tree_map(
+            feedback=jt.map(
                 lambda channel: channel.memory_spec,
                 self.feedback_channels.models,
                 is_leaf=is_module,
@@ -276,7 +277,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
         return SimpleFeedbackState(
             mechanics=self.mechanics.bounds,
             net=self.net.bounds,
-            feedback=jax.tree_map(
+            feedback=jt.map(
                 lambda channel: channel.bounds,
                 self.feedback_channels.models,
                 is_leaf=is_module,
@@ -303,7 +304,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
         before we construct `SimpleFeedback`.
         """
         example_mechanics_state = mechanics.init(key=jr.PRNGKey(0))
-        example_feedback = jax.tree_map(
+        example_feedback = jt.map(
             lambda spec: spec.where(example_mechanics_state),
             _convert_feedback_spec(feedback_spec),
             is_leaf=lambda x: isinstance(x, ChannelSpec),
@@ -336,7 +337,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
             return eqx.tree_at(
                 lambda state: state.feedback,
                 state,
-                jax.tree_map(
+                jt.map(
                     lambda channel_state, spec, channel: eqx.tree_at(
                         lambda channel_state: channel_state.queue,
                         channel_state,
@@ -351,7 +352,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
 
         state = _fill_feedback_queues(state)
 
-        # feedback_queues_unfilled = jax.tree_map(lambda x: None in x.queue, state.feedback)
+        # feedback_queues_unfilled = jt.map(lambda x: None in x.queue, state.feedback)
 
         # state = jax.lax.cond(
         #     any(feedback_queues_unfilled),

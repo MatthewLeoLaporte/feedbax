@@ -7,7 +7,8 @@
 import logging
 
 import equinox as eqx
-import jax 
+import jax
+import jax.tree as jt 
 
 
 from feedbax.loss import (
@@ -41,13 +42,13 @@ def test_loss_composition():
     )
 
     loss_from_dicts = CompositeLoss(
-        jax.tree_map(lambda cls: cls(), loss_classes),
+        jt.map(lambda cls: cls(), loss_classes),
         weights=loss_term_weights,
     )
     
     loss_from_sum = jax.tree_util.tree_reduce(
         lambda x, y: x + y,   
-        jax.tree_map(
+        jt.map(
             lambda w, cls: w * cls(),
             loss_term_weights,
             loss_classes,

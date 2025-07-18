@@ -37,6 +37,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
+import jax.tree as jt
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree, Shaped
 import numpy as np
 import plotly.graph_objs as go  # pyright: ignore [reportMissingTypeStubs]
@@ -108,7 +109,7 @@ class TaskTrialSpec(Module):
     def batch_axes(self) -> PyTree[int]:
         return type(self)(
             inits=0,
-            targets=jax.tree_map(
+            targets=jt.map(
                 lambda x: getattr(x, "batch_axes", 0),
                 self.targets,
                 is_leaf=is_module,
@@ -315,9 +316,9 @@ class AbstractTask(Module):
         )
 
         # Broadcast the non-timeseries arrays.
-        other_broadcasted = jax.tree_map(
+        other_broadcasted = jt.map(
             lambda x: jnp.broadcast_to(x, (self.n_steps - 1, *x.shape)),
-            jax.tree_map(jnp.array, other),
+            jt.map(jnp.array, other),
         )
 
         return eqx.combine(timeseries_arrays, other_broadcasted)
@@ -733,7 +734,7 @@ def _pos_only_states(positions: Float[Array, "... ndim=2"]):
     velocities = jnp.zeros_like(positions)
     forces = jnp.zeros_like(positions)
 
-    states = jax.tree_map(
+    states = jt.map(
         lambda x: CartesianState(*x),
         list(zip(positions, velocities, forces)),
         is_leaf=lambda x: isinstance(x, tuple),
@@ -761,7 +762,7 @@ def internal_grid_points(
         ```>> Array([[3., 3.], [6., 3.], [3., 6.], [6., 6.]]).```
     """
     ticks = jax.vmap(lambda b: jnp.linspace(b[0], b[1], n + 2)[1:-1])(bounds.T)
-    points = jnp.vstack(jax.tree_map(jnp.ravel, jnp.meshgrid(*ticks))).T
+    points = jnp.vstack(jt.map(jnp.ravel, jnp.meshgrid(*ticks))).T
     return points
 
 
@@ -850,7 +851,7 @@ class SimpleReaches(AbstractTask):
         # Broadcast the fixed targets to a sequence with the desired number of
         # time steps, since that's what `ForgetfulIterator` and `Loss` will expect.
         # Hopefully this should not use up any extra memory.
-        effector_target_state = jax.tree_map(
+        effector_target_state = jt.map(
             lambda x: jnp.broadcast_to(x, (self.n_steps - 1, *x.shape)),
             effector_target_state,
         )
@@ -880,7 +881,7 @@ class SimpleReaches(AbstractTask):
 
         # Broadcast to the desired number of time steps. Awkwardly, we also
         # need to use `swapaxes` because the batch dimension is explicit, here.
-        effector_target_states = jax.tree_map(
+        effector_target_states = jt.map(
             lambda x: jnp.swapaxes(jnp.broadcast_to(x, (self.n_steps - 1, *x.shape)), 0, 1),
             effector_target_states,
         )
@@ -1039,7 +1040,7 @@ class DelayedReaches(AbstractTask):
         stim_seqs = get_masked_seqs(
             _forceless_task_inputs(target_states), epoch_masks[self.target_on_epochs]
         )
-        target_seqs = jax.tree_map(
+        target_seqs = jt.map(
             lambda x, y: x + y,
             get_masked_seqs(target_states, move_epoch_mask),
             get_masked_seqs(init_states, epoch_masks[self.hold_epochs]),
@@ -1087,7 +1088,7 @@ class Stabilization(AbstractTask):
 
         init_state = target_state
 
-        effector_target_state = jax.tree_map(
+        effector_target_state = jt.map(
             lambda x: jnp.broadcast_to(x, (self.n_steps - 1, *x.shape)),
             target_state,
         )
@@ -1126,7 +1127,7 @@ class Stabilization(AbstractTask):
 
         # Broadcast to the desired number of time steps. Awkwardly, we also
         # need to use `swapaxes` because the batch dimension is explicit, here.
-        effector_target_states = jax.tree_map(
+        effector_target_states = jt.map(
             lambda x: jnp.swapaxes(
                 jnp.broadcast_to(x, (self.n_steps - 1, *x.shape)), 0, 1
             ),
@@ -1240,10 +1241,10 @@ def get_masked_seqs(
     - Find a better name.
     """
 
-    seqs = jax.tree_map(lambda x: init_fn((masks.shape[1], *x.shape)), arrays)
+    seqs = jt.map(lambda x: init_fn((masks.shape[1], *x.shape)), arrays)
     # seqs = tree_set(seqs, targets, slice(*epoch_idxs[target_epoch:target_epoch + 2]))
     mask = jnp.prod(masks, axis=0)
-    seqs = jax.tree_map(
+    seqs = jt.map(
         lambda x, y: jnp.where(
             jnp.expand_dims(mask, np.arange(y.ndim) + 1), x, y[None, :]
         ),

@@ -18,6 +18,7 @@ from typing import (
 import equinox as eqx
 from equinox import Module
 import jax
+import jax.tree as jt
 from jaxtyping import Array, PRNGKeyArray, PyTree
 import numpy as np
 
@@ -134,7 +135,7 @@ class MultiModel(AbstractModel[StateT]):
     ) -> StateT:
 
         # TODO: This is hacky, because I want to pass intervenor stuff through entirely. See `staged`
-        return jax.tree_map(
+        return jt.map(
             lambda model, input_value, state, key: model(
                 ModelInput(input_value, input_.intervene), state, key
             ),
@@ -153,7 +154,7 @@ class MultiModel(AbstractModel[StateT]):
         *,
         key: Optional[PRNGKeyArray] = None,
     ) -> StateT:
-        return jax.tree_map(
+        return jt.map(
             lambda model, key: model.init(key=key),
             self.models,
             self._get_keys(key),

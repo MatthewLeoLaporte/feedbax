@@ -17,6 +17,7 @@ from typing import Any, Literal, Optional, Tuple, TYPE_CHECKING
 
 import equinox as eqx
 import jax
+import jax.tree as jt
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
@@ -681,7 +682,7 @@ def _losses_terms_dfs(losses):
             "Total": pd.DataFrame(losses.T, index=range(losses_arr.shape[1]))
         }
     elif isinstance(losses, LossDict):
-        losses_terms_dfs = jax.tree_map(
+        losses_terms_dfs = jt.map(
             lambda losses: pd.DataFrame(losses.T, index=range(losses.shape[1])).melt(
                 var_name="Iteration", value_name="Loss"
             ),
@@ -770,7 +771,7 @@ def reach_endpoint_dists(
         raise ValueError("No effector position targets available in trial specs")
 
 
-    endpoint_pos_dfs = jax.tree_map(
+    endpoint_pos_dfs = jt.map(
         lambda arr: pd.DataFrame(arr.pos, columns=("x", "y")),
         endpoints,
         is_leaf=lambda x: isinstance(x, CartesianState),
@@ -1279,13 +1280,13 @@ class preserve_axes_limits:
     very large limits so that it definitely spans the visible region, but
     we don't want the plot to adjust its limits to those of the `hlines`.
 
-    It is perhaps odd to use `jax.tree_map` for a stateful operation like
+    It is perhaps odd to use `jt.map` for a stateful operation like
     the one in `__exit__`, but it works.
     """
 
     def __init__(self, axs: PyTree[mplax.Axes]):
         self._axs = axs
-        self._lims = jax.tree_map(
+        self._lims = jt.map(
             lambda ax: dict(
                 x=ax.get_xlim(),
                 y=ax.get_ylim(),
@@ -1298,7 +1299,7 @@ class preserve_axes_limits:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        jax.tree_map(
+        jt.map(
             lambda ax, lims: (ax.set_xlim(lims["x"]), ax.set_ylim(lims["y"])),
             self._axs,
             self._lims,

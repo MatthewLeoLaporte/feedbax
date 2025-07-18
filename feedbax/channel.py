@@ -110,12 +110,12 @@ class Channel(AbstractStagedModel[ChannelState]):
 
     def _add_noise(self, input, state, *, key):
         assert self.noise_func is not None
-        noise = jax.tree_map(
+        noise = jt.map(
             self.noise_func,
             random_split_like_tree(key, input),
             input,
         )
-        output = jax.tree_map(lambda x, y: x + y, input, noise)
+        output = jt.map(lambda x, y: x + y, input, noise)
         return noise, output
 
     @property
@@ -165,7 +165,7 @@ class Channel(AbstractStagedModel[ChannelState]):
 
     def init(self, *, key: PRNGKeyArray) -> ChannelState:
         """Returns an empty `ChannelState` for the channel."""
-        input_init = jax.tree_map(
+        input_init = jt.map(
             lambda x: jnp.full_like(x, self.init_value), self.input_proto
         )
 

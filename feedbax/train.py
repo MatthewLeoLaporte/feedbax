@@ -394,7 +394,7 @@ class TaskTrainer(eqx.Module):
 
         if ensembled:
             # We only vmap over axis 0 of the *array* components of the model.
-            flat_model_arr_spec = jax.tree_map(
+            flat_model_arr_spec = jt.map(
                 lambda x: eqx.if_array(0) if not isinstance(x, AbstractIntervenor) else None,
                 flat_model,
                 is_leaf=lambda x: isinstance(x, AbstractIntervenor),
@@ -420,7 +420,7 @@ class TaskTrainer(eqx.Module):
 
             # We can't simply flatten `model_array_spec` to get `flat_model_array_spec`,
             # even if we use `is_leaf=is_none`.
-            # model_array_spec = jax.tree_map(
+            # model_array_spec = jt.map(
             #     lambda x: eqx.if_array(0) if not isinstance(x, AbstractIntervenor) else None,
             #     model,
             #     is_leaf=lambda x: isinstance(x, AbstractIntervenor),
@@ -580,7 +580,7 @@ class TaskTrainer(eqx.Module):
 
             # tensorboard losses on every iteration
             if ensembled:
-                losses_mean = jax.tree_map(lambda x: jnp.mean(x, axis=-1), losses)
+                losses_mean = jt.map(lambda x: jnp.mean(x, axis=-1), losses)
                 # This will be appended to user-facing labels
                 # e.g. "mean training loss"
                 ensembled_str = "mean "
@@ -638,7 +638,7 @@ class TaskTrainer(eqx.Module):
                 )
 
                 if ensembled:
-                    losses_validation_mean = jax.tree_map(
+                    losses_validation_mean = jt.map(
                         lambda x: jnp.mean(x, axis=-1), losses_validation
                     )
                     # Only log a validation plot for the first replicate.
@@ -834,7 +834,7 @@ def _get_trainable_params_superset(
             filter_spec_leaves(model, where_func)
             for where_func in where_train.values()
         ]
-        return jax.tree_map(
+        return jt.map(
             lambda *xs: any(x for x in xs if x is not None),
             *specs,
             is_leaf=lambda x: x is None,
@@ -932,7 +932,7 @@ def init_task_trainer_history(
             ]
 
             n_save_steps = save_steps.shape[0]
-            model_train_history = jax.tree_map(
+            model_train_history = jt.map(
                 lambda x: (
                     jnp.full((n_save_steps,) + x.shape, jnp.nan)
                     if eqx.is_array(x) else x
@@ -940,7 +940,7 @@ def init_task_trainer_history(
                 model_parameters,
             )
         else:
-            model_train_history = jax.tree_map(
+            model_train_history = jt.map(
                 lambda x: jnp.full((n_batches - start_batch,) + x.shape, jnp.nan) if eqx.is_array(x) else x,
                 model_parameters,
             )
@@ -1128,7 +1128,7 @@ class HebbianGRUUpdate(eqx.Module):
 
         update = eqx.tree_at(
             lambda model: model.step.net.hidden.weight_hh,
-            jax.tree_map(lambda x: None, model),
+            jt.map(lambda x: None, model),
             weight_hh,
             is_leaf=is_none,
         )

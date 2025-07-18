@@ -68,14 +68,14 @@ def columns_mean_std(dfs: PyTree[pl.DataFrame], index_col: Optional[str] = None)
             "std": pl.concat_list(pl.col('*')).list.std(),
         }
 
-    return jax.tree_map(
+    return jt.map(
         lambda df: df.select(**spec),
         dfs,
     )
 
 
 def errorbars(col_means_stds: PyTree[pl.DataFrame], n_std: int):
-    return jax.tree_map(
+    return jt.map(
         lambda df: df.select(
             lb=pl.col('mean') - n_std * pl.col('std'),
             ub=pl.col('mean') + n_std * pl.col('std'),
@@ -322,7 +322,7 @@ def loss_history(
     else:
         raise ValueError(f"{loss_context} is not a valid loss context" )
 
-    losses: LossDict | Array = jax.tree_map(
+    losses: LossDict | Array = jt.map(
         lambda x: np.array(x),
         losses,
     )
@@ -331,13 +331,13 @@ def loss_history(
 
     timesteps = pl.DataFrame({"timestep": range(losses_total.shape[0])})
 
-    dfs = jax.tree_map(
+    dfs = jt.map(
         lambda losses: pl.DataFrame(losses),
         OrderedDict({"Total": losses_total}) | dict(losses),
     )
 
     # TODO: Only apply this when yaxis is log scaled
-    dfs = jax.tree_map(
+    dfs = jt.map(
         lambda df: df.select([
             np.log10(pl.all()),
         ]),
@@ -348,7 +348,7 @@ def loss_history(
     error_bars_bounds = errorbars(loss_statistics, n_std_plot)
 
     # TODO: Only apply this when yaxis is log scaled
-    loss_statistics, error_bars_bounds = jax.tree_map(
+    loss_statistics, error_bars_bounds = jt.map(
         lambda df: timesteps.hstack(df.select([
             np.power(10, pl.col("*")),  # type: ignore
         ])),
@@ -713,13 +713,13 @@ def effector_trajectories(
 
     if len(vars_tuple[0].shape) > 3:
         # Collapse to a single batch dimension
-        vars_tuple = jax.tree_map(
+        vars_tuple = jt.map(
             lambda arr: np.reshape(arr, (-1, *arr.shape[-3:])),
             vars_tuple,
         )
         dfs = [
             tree_of_2d_timeseries_to_df(v, labels=var_labels_)
-            for v in zip(*jax.tree_map(tuple, vars_tuple))
+            for v in zip(*jt.map(tuple, vars_tuple))
         ]
         dfs = [
             df.hstack(pl.DataFrame({"Trial": pl.repeat(i, len(df), eager=True)}))

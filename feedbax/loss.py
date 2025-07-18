@@ -50,6 +50,7 @@ from equinox import AbstractVar, Module, field
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import jax.tree as jt
 from jaxtyping import Array, Float, PyTree
 
 from feedbax._model import AbstractModel
@@ -231,7 +232,7 @@ class CompositeLoss(AbstractLoss):
         )
 
         # Removes the `None` values from the lists.
-        term_tuples_leaves = jax.tree_map(
+        term_tuples_leaves = jt.map(
             lambda x: jtu.tree_leaves(x, is_leaf=lambda x: isinstance(x, tuple)),
             term_tuples_split,
             is_leaf=lambda x: isinstance(x, list),
@@ -297,21 +298,21 @@ class CompositeLoss(AbstractLoss):
             trial_specs: Task specifications for the set of trials.
         """
         # Evaluate all loss terms
-        losses = jax.tree_map(
+        losses = jt.map(
             lambda loss: loss.term(states, trial_specs, model),
             self.terms,
             is_leaf=lambda x: isinstance(x, AbstractLoss),
         )
 
         # aggregate over batch for state-based losses
-        losses = jax.tree_map(
+        losses = jt.map(
             lambda x: jnp.mean(x, axis=0) if x.ndim > 0 else x,
             losses,
         )
 
         if self.weights is not None:
             # term scaling
-            losses = jax.tree_map(
+            losses = jt.map(
                 lambda term, weight: term * weight,
                 dict(losses),
                 self.weights,
@@ -740,7 +741,7 @@ def power_discount(n_steps: int, discount_exp: int = 6) -> Array:
 
 def mse(x, y):
     """Mean squared error."""
-    return jax.tree_map(
+    return jt.map(
         lambda x, y: jnp.mean((x - y) ** 2),
         x,
         y,

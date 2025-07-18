@@ -16,6 +16,7 @@ import equinox as eqx
 # from equinox._pretty_print import tree_pp, bracketed
 import jax
 import jax.tree_util as jtu
+import jax.tree as jt
 from jaxtyping import Array, PyTree
 
 from feedbax.misc import unzip2, where_func_to_attr_str_tree
@@ -110,7 +111,7 @@ class _WhereRepr:
         self.term_strs = where_func_to_attr_str_tree(where)
 
     def __repr__(self):
-        terms = jax.tree_map(
+        terms = jt.map(
             lambda leaf: ".".join([self.bound_var, leaf]) if leaf else self.bound_var,
             self.term_strs,
         )

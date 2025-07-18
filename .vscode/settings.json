@@ -39,5 +39,6 @@
     ],
     "explorer.autoReveal": false,
     "scm.autoReveal": false,
-    "files.trimTrailingWhitespace": true
+    "files.trimTrailingWhitespace": true,
+    "claudeCodeChat.permissions.yoloMode": false
 }

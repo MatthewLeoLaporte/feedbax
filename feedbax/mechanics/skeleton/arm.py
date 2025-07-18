@@ -13,6 +13,7 @@ import equinox as eqx
 from equinox import field
 import jax
 import jax.numpy as jnp
+import jax.tree as jt
 from jaxtyping import Array, Float, PRNGKeyArray, Scalar
 import numpy as np
 
@@ -295,7 +296,7 @@ class TwoLinkArm(AbstractSkeleton[TwoLinkArmState]):
         Arguments:
             state: The configuration state of the arm.
         """
-        return jax.tree_map(
+        return jt.map(
             lambda x: x[-1],  # last link
             self.forward_kinematics(state),
         )

@@ -35,6 +35,7 @@ from equinox import Module
 # from equinox._pretty_print import tree_pp, bracketed
 import jax
 import jax.numpy as jnp
+import jax.tree as jt
 import jax._src.pretty_printer as pp
 import jax.tree_util as jtu
 import jax.tree as jt
@@ -192,7 +193,7 @@ def interleave_unequal(*args):
 
 def corners_2d(bounds: Float[Array, "2 xy=2"]):
     """Generate the corners of a rectangle from its bounds."""
-    xy = jax.tree_map(jnp.ravel, jnp.meshgrid(*bounds.T))
+    xy = jt.map(jnp.ravel, jnp.meshgrid(*bounds.T))
     return jnp.vstack(xy)
 
 
@@ -376,7 +377,7 @@ def where_func_to_paths(where: Callable, tree: PyTree):
 
     paths_by_id = {node_id: path for path, node_id in jtu.tree_leaves_with_path(
         jtu.tree_map(
-            lambda x: x if x in jax.tree_leaves(node_ids) else None,
+            lambda x: x if x in jt.leaves(node_ids) else None,
             id_tree,
         )
     )}
@@ -416,7 +417,7 @@ def where_func_to_attr_str_tree(where: Callable) -> PyTree[str]:
     """
 
     try:
-        return jax.tree_map(_get_where_str_constructor_label, where(_WhereStrConstructor()))
+        return jt.map(_get_where_str_constructor_label, where(_WhereStrConstructor()))
     except TypeError:
         raise TypeError("`where` must return a PyTree of node references")
 
@@ -518,7 +519,7 @@ def batch_reshape(
             )
 
         return wrapper
-    
+
     if func is None:
         # Called with parentheses: @batch_reshape() or @batch_reshape(n_nonbatch=2)
         return decorator

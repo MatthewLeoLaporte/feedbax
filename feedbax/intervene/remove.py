@@ -12,6 +12,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import jax.tree as jt
 from jaxtyping import PyTree
 
 from feedbax._model import AbstractModel
@@ -52,7 +53,7 @@ def remove_intervenors(
     return eqx.tree_at(
         where,
         model,
-        jax.tree_map(
+        jt.map(
             lambda submodel: eqx.tree_at(
                 lambda submodel: submodel.intervenors,
                 submodel,

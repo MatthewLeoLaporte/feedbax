@@ -23,6 +23,7 @@ import equinox as eqx
 from equinox import Module
 import jax
 import jax.numpy as jnp
+import jax.tree as jt
 from jaxtyping import Array, PRNGKeyArray, PyTree
 
 from feedbax.intervene import AbstractIntervenor, AbstractIntervenorInput, is_intervenor
@@ -354,7 +355,7 @@ def schedule_intervenor(
     # will be registered with.
     invalid_labels_models = jax.tree_util.tree_reduce(
         lambda x, y: x + y,
-        jax.tree_map(
+        jt.map(
             lambda model: model.step._all_intervenor_labels,
             models,
             is_leaf=is_module,  # AbstractModel
@@ -363,7 +364,7 @@ def schedule_intervenor(
     )
     invalid_labels_tasks = jax.tree_util.tree_reduce(
         lambda x, y: x + y,
-        jax.tree_map(
+        jt.map(
             lambda task: tuple(task.intervention_specs.all.keys()),
             tasks,
             is_leaf=is_module,  # AbstractTask
@@ -401,7 +402,7 @@ def schedule_intervenor(
         intervention_specs_validation = dict()
 
     # Add the spec intervenors to every task in `tasks`
-    tasks = jax.tree_map(
+    tasks = jt.map(
         lambda task: eqx.tree_at(
             lambda task: (
                 task.intervention_specs.training,
@@ -425,7 +426,7 @@ def schedule_intervenor(
     key_example = jax.random.PRNGKey(0)
     # Assume that all the tasks are compatible with the way trial specs are used
     # to generate trial-by-trial intervenor parameters.
-    task_example = jax.tree_leaves(
+    task_example = jt.leaves(
         tasks, is_leaf=is_module  # AbstractTask
     )[0]
     batch_info_example = BatchInfo(size=0, current=0, total=0)
@@ -449,7 +450,7 @@ def schedule_intervenor(
     )
 
     # Add the intervenor to all of the models.
-    models = jax.tree_map(
+    models = jt.map(
         lambda model: add_intervenors(
             model,
             where=where,
@@ -494,14 +495,14 @@ def update_intervenor_param_schedule(
     else:
         is_leaf_or_timeseries = is_timeseries_param
 
-    params_flat = jax.tree_leaves(params, is_leaf=is_leaf_or_timeseries)
+    params_flat = jt.leaves(params, is_leaf=is_leaf_or_timeseries)
 
     for suffix, cond in {"training": training, "validation": validation}.items():
         if cond:
             specs = getattr(task.intervention_specs, suffix)
 
             specs = eqx.tree_at(
-                lambda specs: jax.tree_leaves({
+                lambda specs: jt.leaves({
                     intervenor_label: {
                         param_name: getattr(
                             specs[intervenor_label].intervenor.params,
@@ -533,19 +534,19 @@ def update_fixed_intervenor_param(
     labels: Optional[PyTree[str, 'T']] = None,
 ) -> "AbstractStagedModel":
     if labels is None:
-        labels = jax.tree_map(
+        labels = jt.map(
             lambda spec: f"FIXED_{type(spec.intervenor).__name__}",
             specs,
             is_leaf=is_module,
         )
 
-    get_params = lambda model: jax.tree_leaves(jax.tree_map(
+    get_params = lambda model: jt.leaves(jt.map(
         lambda spec, label: spec.where(model).intervenors[spec.stage_name][label].params,
         specs, labels,
         is_leaf=is_module,
     ), is_leaf=is_module)
 
-    new_params = jax.tree_map(
+    new_params = jt.map(
         lambda x: eqx.tree_at(
             lambda params: getattr(params, param_name),
             x,

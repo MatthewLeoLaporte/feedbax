@@ -20,6 +20,7 @@ from typing import Optional, Self, Tuple
 import equinox as eqx
 from equinox import AbstractVar, Module, field
 import jax
+import jax.tree as jt
 import jax.random as jr
 import jax.numpy as jnp
 from jaxtyping import Array, ArrayLike, Float, PRNGKeyArray, PyTree, Scalar
@@ -460,7 +461,7 @@ BROWN_SLOW_TWITCH_VIRTUALMUSCLE_PARAMS = dict(
 
 """Averaged slow- and fast-twitch fiber parameters for the Virtual Muscle Model
 (Brown et al. 1999)."""
-BROWN_SLOWFAST_AVG_VIRTUALMUSCLE_PARAMS = jax.tree_map(
+BROWN_SLOWFAST_AVG_VIRTUALMUSCLE_PARAMS = jt.map(
     lambda x, y: (x + y) / 2,
     BROWN_SLOW_TWITCH_VIRTUALMUSCLE_PARAMS,
     BROWN_FAST_TWITCH_VIRTUALMUSCLE_PARAMS,

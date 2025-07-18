@@ -19,6 +19,7 @@ import equinox as eqx
 from equinox import Module, field
 import jax
 import jax.numpy as jnp
+import jax.tree as jt
 from jaxtyping import Array, Float, PyTree
 
 
@@ -43,7 +44,7 @@ class StateBounds(Module, Generic[StateT]):
     @cached_property
     def filter_spec(self) -> PyTree[bool]:
         """A matching PyTree, indicated which parts of the state are bounded."""
-        return jax.tree_map(
+        return jt.map(
             lambda x: x is not None,
             self,
             is_leaf=lambda x: isinstance(x, Array) or x is None,
@@ -98,7 +99,7 @@ def _clip_state_to_bound(
         filter_spec,
     )
 
-    states_clipped = jax.tree_map(
+    states_clipped = jt.map(
         lambda x, y: jnp.where(op(x, y), x, y),
         states_to_clip,
         bound,

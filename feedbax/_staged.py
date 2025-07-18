@@ -25,6 +25,7 @@ import equinox as eqx
 from equinox import AbstractVar, Module, field
 import jax
 import jax.random as jr
+import jax.tree as jt
 from jaxtyping import Array, PRNGKeyArray, PyTree
 import numpy as np
 
@@ -268,7 +269,7 @@ class AbstractStagedModel(AbstractModel[StateT]):
         This should not be referred to in `__init__` before assigning `self.intervenors`!
         """
 
-        return jax.tree_map(
+        return jt.map(
             lambda x, y: eqx.tree_at(lambda x: x.intervenors, x, y),
             self.model_spec,
             OrderedDict({

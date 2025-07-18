@@ -47,6 +47,7 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
+import jax.tree as jt
 from jaxtyping import Array, ArrayLike, Float, PRNGKeyArray, PyTree
 
 from feedbax.noise import Normal
@@ -124,7 +125,7 @@ class AbstractIntervenor(Module, Generic[StateT, InputT]):
     #             isinstance(other, ArrayLike)
     #             and isinstance(substate, PyTree[type(other)])
     #         ):
-    #             return lambda substate, other: jax.tree_map(lambda _: other, substate)
+    #             return lambda substate, other: jt.map(lambda _: other, substate)
     #         else:
     #             raise ValueError("Intervenor output structure 1) does not match "
     #                              "indicated output substate, and 2) is not a "
@@ -147,7 +148,7 @@ class AbstractIntervenor(Module, Generic[StateT, InputT]):
         def _get_updated_substate():
             substate = self.out_where(state)
             other = self.transform(params, self.in_where(state), key=key)
-            return jax.tree_map(
+            return jt.map(
                 lambda x, y: self.operation(x, params.scale * y),
                 substate, other,
             )
@@ -302,7 +303,7 @@ class AddNoise(AbstractIntervenor[StateT, AddNoiseParams]):
     ) -> PyTree[Array, "T"]:
         """Return a PyTree of scaled noise arrays with the same structure/shapes as
         `substate_in`."""
-        noise = jax.tree_map(
+        noise = jt.map(
             lambda x:  self.noise_func(key, x),
             substate_in,
         )
@@ -355,7 +356,7 @@ class NetworkClamp(AbstractIntervenor["NetworkState", NetworkIntervenorParams]):
         key: PRNGKeyArray
     ) -> PyTree[Array, "T"]:
 
-        return jax.tree_map(
+        return jt.map(
             lambda x, y: jnp.where(jnp.isnan(y), x, y),
             substate_in,
             params.unit_spec,
@@ -389,7 +390,7 @@ class NetworkConstantInput(AbstractIntervenor["NetworkState", NetworkIntervenorP
         *,
         key: PRNGKeyArray,
     ) -> PyTree[Array, "T"]:
-        return jax.tree_map(jnp.nan_to_num, params.unit_spec)
+        return jt.map(jnp.nan_to_num, params.unit_spec)
 
 
 class ConstantInputParams(AbstractIntervenorInput):

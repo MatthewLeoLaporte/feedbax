@@ -16,6 +16,7 @@ from equinox import AbstractVar, Module, field
 import jax
 from jax import Array
 import jax.numpy as jnp
+import jax.tree as jt
 from jaxtyping import Float, PRNGKeyArray, PyTree, Scalar
 from feedbax.dynamics import AbstractDynamicalSystem
 from feedbax.intervene import AbstractIntervenor
@@ -98,7 +99,7 @@ class AbstractPlant(
             state: The state of the musculoskeletal system.
             input: The control inputs to the musculoskeletal system.
         """
-        d_state = jax.tree_map(jnp.zeros_like, state)
+        d_state = jt.map(jnp.zeros_like, state)
 
         for component in self.dynamics_spec.values():
             d_state = eqx.tree_at(

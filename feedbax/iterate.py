@@ -14,6 +14,7 @@ import jax
 import jax.lax as lax
 import jax.numpy as jnp
 import jax.random as jr
+import jax.tree as jt
 from jaxtyping import Array, PRNGKeyArray, PyTree, Shaped
 
 from feedbax._progress import _tqdm
@@ -101,7 +102,7 @@ class Iterator(AbstractIterator[StateT]):
             (input_, keys),
         )
 
-        return jax.tree_map(
+        return jt.map(
             lambda state0, state: jnp.concatenate([state0[None], state], axis=0),
             state,
             states,
@@ -226,8 +227,8 @@ class ForgetfulIterator(AbstractIterator[StateT]):
             eqx.filter(outputs, self.memory_spec),
             eqx.is_array_like,  # False for jax.ShapeDtypeStruct
         )
-        asarrays = eqx.combine(jax.tree_map(jnp.asarray, scalars), array_structs)
-        states = jax.tree_map(
+        asarrays = eqx.combine(jt.map(jnp.asarray, scalars), array_structs)
+        states = jt.map(
             lambda x: jnp.zeros((self.n_steps, *x.shape), dtype=x.dtype),
             asarrays,
         )
