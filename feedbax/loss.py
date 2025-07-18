@@ -745,3 +745,25 @@ def mse(x, y):
         x,
         y,
     )
+
+
+def nan_safe_mse(
+    preds: Array,
+    targets: Array,
+) -> Array:
+    """
+    Calculates MSE safely for gradients when targets have NaN entries.
+
+    Assumes that if `pred` has NaN entries, then `target` will also have NaNs in the same rows.
+
+    Computes a mask of the NaN entries in `targets`, replaces NaNs with zeros,
+    proceeds with MSE calculation, then masks the NaN entries out of the result
+    prior to aggregation.
+    """
+    valid_mask = ~jnp.isnan(targets)
+    targets_cleaned = jnp.nan_to_num(targets, nan=0.0)
+    squared_errors = (preds - targets_cleaned)**2
+    masked_squared_errors = jnp.where(valid_mask, squared_errors, 0.0)
+    sum_of_squared_errors = jnp.sum(masked_squared_errors)
+    num_valid_elements = jnp.sum(valid_mask)
+    return sum_of_squared_errors / jnp.maximum(num_valid_elements, 1.0)

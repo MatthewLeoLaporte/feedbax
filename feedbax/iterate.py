@@ -77,13 +77,13 @@ class Iterator(AbstractIterator[StateT]):
 
     def __call__(
         self,
-        input: PyTree,
+        input_: PyTree,
         state: StateT,
         key: PRNGKeyArray,
     ) -> StateT:
         """
         Arguments:
-            input: The input to the model.
+            input_: The input to the model.
             state: The initial state of the model to be iterated.
             key: Determines the pseudo-randomness in model execution.
         """
@@ -98,7 +98,7 @@ class Iterator(AbstractIterator[StateT]):
         _, states = lax.scan(
             step,
             state,
-            (input, keys),
+            (input_, keys),
         )
 
         return jax.tree_map(
@@ -142,24 +142,24 @@ class ForgetfulIterator(AbstractIterator[StateT]):
     @jax.named_scope("fbx.ForgetfulIterator")
     def __call__(
         self,
-        input: PyTree,  # [Shaped[Array, "n_steps ..."]],
+        input_: PyTree,  # [Shaped[Array, "n_steps ..."]],
         state: StateT,
         key: PRNGKeyArray,
     ) -> StateT:  #! Adds a batch dimension, actually.
         """
         Arguments:
-            input: The input to the model.
+            input_: The input to the model.
             state: The initial state of the model to be iterated.
             key: Determines the pseudo-randomness in model execution.
         """
         key1, key2, key3 = jr.split(key, 3)
 
-        init_input = tree_take(input, 0)
+        init_input = tree_take(input_, 0)
         states = self._init_arrays(init_input, state, key2)
 
         if os.environ.get("FEEDBAX_DEBUG", False) == "True":
             for i in _tqdm(range(self.n_steps), desc="steps"):
-                input, states, key3 = self._body_func(i, (input, states, key3))
+                input_, states, key3 = self._body_func(i, (input_, states, key3))
 
             return states
 
@@ -167,7 +167,7 @@ class ForgetfulIterator(AbstractIterator[StateT]):
             0,
             self.n_steps,
             self._body_func,
-            (input, states, key3),
+            (input_, states, key3),
         )
 
         return states

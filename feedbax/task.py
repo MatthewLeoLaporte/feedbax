@@ -16,7 +16,7 @@ TODO:
 
 from abc import abstractmethod, abstractproperty
 from collections.abc import Callable, Mapping, MutableSequence, Sequence
-from functools import cached_property
+from functools import cached_property, partial
 import logging
 from typing import (
     TYPE_CHECKING,
@@ -543,7 +543,7 @@ class AbstractTask(Module):
 
         states, losses = self.eval_trials(model, trial_specs, keys_eval)
 
-        return states, losses, trials
+        return states, losses, trial_specs
 
     @eqx.filter_jit
     def eval_ensemble_train_batch(
@@ -650,6 +650,26 @@ class AbstractTask(Module):
             )
 
         return model_
+
+    def add_input(self, name: str, input_fn: Callable[[TaskTrialSpec, PRNGKeyArray], PyTree], exist_ok: bool = True) -> Self:
+        """Add a task input; i.e. additional data that the task will provide to the model.
+
+        Arguments:
+            name: The unique name of the input. If a task input with this name already exists
+                for this task, an error will be raised.
+            input_fn: A function that will generate the value of the input on each trial,
+                given the trial spec and a random key.
+        """
+        if not exist_ok and name in self.input_dependencies:
+            err_msg = f"Task input with name '{name}' already exists."
+            logger.error(err_msg)
+            raise ValueError(err_msg)
+
+        return eqx.tree_at(
+            lambda task: task.input_dependencies,
+            self,
+            self.input_dependencies | {name: TrialSpecDependency(input_fn)},
+        )
 
     @abstractmethod
     def validation_plots(

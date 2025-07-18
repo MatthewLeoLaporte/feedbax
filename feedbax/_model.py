@@ -39,14 +39,14 @@ class AbstractModel(Module, Generic[StateT]):
     @abstractmethod
     def __call__(
         self,
-        input: PyTree[Array],
+        input_: PyTree[Array],
         state: StateT,
         key: PRNGKeyArray,
     ) -> StateT:
         """Return an updated state, given inputs and a prior state.
 
         Arguments:
-            input: The inputs to the model.
+            input_: The inputs to the model.
             state: The prior state associated with the model.
             key: A random key used for model operations.
         """
@@ -118,7 +118,7 @@ class AbstractModel(Module, Generic[StateT]):
 class ModelInput(Module):
     """PyTree that contains all inputs to a model."""
 
-    input: PyTree[Array]
+    value: PyTree[Array]
     intervene: Mapping[str, "AbstractIntervenorInput"]
 
 
@@ -128,18 +128,18 @@ class MultiModel(AbstractModel[StateT]):
 
     def __call__(
         self,
-        input: ModelInput,
+        input_: ModelInput,
         state: PyTree[StateT, "T"],
         key: PRNGKeyArray,
     ) -> StateT:
 
         # TODO: This is hacky, because I want to pass intervenor stuff through entirely. See `staged`
         return jax.tree_map(
-            lambda model, input_, state, key: model(
-                ModelInput(input_, input.intervene), state, key
+            lambda model, input_value, state, key: model(
+                ModelInput(input_value, input_.intervene), state, key
             ),
             self.models,
-            input.input,
+            input_.value,
             state,
             self._get_keys(key),
             is_leaf=lambda x: isinstance(x, AbstractModel),

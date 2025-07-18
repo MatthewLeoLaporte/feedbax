@@ -42,12 +42,12 @@ class AbstractDynamicalSystem(AbstractModel[StateT]):
 
     def __call__(
         self,
-        input: PyTree[Array],
+        input_: PyTree[Array],
         state: StateT,
         key: PRNGKeyArray,
     ) -> StateT:
         """Alias for `vector_field`, with a modified signature."""
-        return self.vector_field(jnp.array(0.), state, input)
+        return self.vector_field(jnp.array(0.), state, input_)
 
     @abstractmethod
     def vector_field(

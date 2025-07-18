@@ -1,6 +1,8 @@
 .gitmessage
 COMMIT_MSG.txt
 
+.specstory
+
 # Markdown copies of example notebooks
 # (They are meant to make search-replace easier)
 examples/markdown/

@@ -1,0 +1,89 @@
+[project]
+name = "feedbax"
+version = "0.1.2"
+description = "Optimal feedback control + interventions in JAX."
+# url = ""
+authors = [
+    {name = "Matt L Laporte", email = "matt.l.laporte@gmail.com"}
+]
+license = {file = "LICENSE"}
+readme = "README.md"
+keywords = [
+    'jax',
+    'neural-networks',
+    'optimal-control',
+    'optimal-feedback-control',
+    'pytorch',
+    'biomechanics'
+]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: English",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "diffrax",
+    "equinox",
+    "jax",
+    "jaxtyping",
+    "matplotlib",
+    "numpy",
+    "optax",
+    "plotly",
+    "polars",
+    "seaborn",
+    "tqdm",
+    # Tensorboard-related:
+    'crc32c',
+    'tensorboardX',
+]
+
+[project.urls]
+repository = "https://github.com/mlprt/feedbax"
+documentation = "https://docs.lprt.ca/feedbax"
+
+[project.optional-dependencies]
+tensorboard = [
+    'tensorboardX',
+    'crc32c',
+]
+typing = [
+    'pyright',
+    'typeguard',
+]
+tests = [
+    'coverage',
+    'pytest',
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+packages = ["feedbax"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["feedbax"]
+
+[tool.pyright]
+include = ["feedbax"]
+exclude = ["**/__pycache__"]
+verboseOutput = true
+reportMissingImports = true
+reportMissingTypeStubs = true
+# Temporary:
+# reportAttributeAccessIssue = false
+
+[tool.black]
+target-version = ['py310', 'py311', 'py312']
+include = 'feedbax\/.*\.pyi?$'
+line-length = 88

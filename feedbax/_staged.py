@@ -18,7 +18,7 @@ from typing import (
     Self,
     TypeAlias,
     TypeVar,
-    Union,
+    Union, dataclass_transform,
 )
 
 import equinox as eqx
@@ -53,12 +53,12 @@ T = TypeVar("T", bound=Module)
 
 class ModelStageCallable(Protocol):
     # This is part of the `ModelInput` hack.
-    def __call__(self, input: ModelInput, state: PyTree[Array], *, key: PRNGKeyArray) -> PyTree[Array]:
+    def __call__(self, input_: ModelInput, state: PyTree[Array], *, key: PRNGKeyArray) -> PyTree[Array]:
         ...
         
 
 class OtherStageCallable(Protocol):
-    def __call__(self, input: PyTree[Array], state: PyTree[Array], *, key: PRNGKeyArray) -> PyTree[Array]:
+    def __call__(self, input_: PyTree[Array], state: PyTree[Array], *, key: PRNGKeyArray) -> PyTree[Array]:
         ...
 
 
@@ -137,14 +137,14 @@ class AbstractStagedModel(AbstractModel[StateT]):
 
     def __call__(
         self,
-        input: ModelInput,
+        input_: ModelInput,
         state: StateT,
         key: PRNGKeyArray,
     ) -> StateT:
         """Return an updated model state, given input and a prior state.
 
         Arguments:
-            input: The input to the model.
+            input_: The input to the model.
             state: The prior state of the model.
             key: A random key which will be split to provide separate keys for
                 each model stage and intervenor.
@@ -155,7 +155,7 @@ class AbstractStagedModel(AbstractModel[StateT]):
             if pre_first_stage in self.intervenors:
                 state = self._apply_intervenors(
                     self.intervenors[pre_first_stage],
-                    input.intervene,
+                    input_.intervene,
                     state,
                     key,
                 )
@@ -167,12 +167,12 @@ class AbstractStagedModel(AbstractModel[StateT]):
                 key_intervene, key_stage = jr.split(key)
 
                 callable_ = stage.callable(self)
-                subinput = stage.where_input(input.input, state)
+                subinput = stage.where_input(input_.value, state)
 
                 # TODO: What's a less hacky way of doing this?
                 # I was trying to avoid introducing additional parameters to `AbstractStagedModel.__call__`
                 if isinstance(callable_, AbstractModel):
-                    callable_input = ModelInput(subinput, input.intervene)
+                    callable_input = ModelInput(subinput, input_.intervene)
                 else:
                     callable_input = subinput
 
@@ -189,7 +189,7 @@ class AbstractStagedModel(AbstractModel[StateT]):
                 # Intervenors assigned to a stage are applied after the stage.
                 state = self._apply_intervenors(
                     stage.intervenors,
-                    input.intervene,
+                    input_.intervene,
                     state,
                     key_intervene,
                 )
@@ -216,7 +216,7 @@ class AbstractStagedModel(AbstractModel[StateT]):
             if post_final_stage in self.intervenors:
                 state = self._apply_intervenors(
                     self.intervenors[post_final_stage],
-                    input.intervene,
+                    input_.intervene,
                     state,
                     key,
                 )

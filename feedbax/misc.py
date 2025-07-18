@@ -436,7 +436,8 @@ def attr_str_tree_to_where_func(tree: PyTree[str]) -> Callable:
 
 
 def batch_reshape(
-    func: Callable[[Shaped[Array, "batch *n"]], Shaped[Array, "batch *m"]],
+    func: Optional[Callable[[Shaped[Array, "batch *n"]], Shaped[Array, "batch *m"]]] = None,
+    *,
     n_nonbatch: int | Sequence[int] = 1,
 ):
     """Decorate a function to collapse its input array to a single batch dimension, and uncollapse the result.
@@ -483,38 +484,47 @@ def batch_reshape(
     Arguments:
         func: A function whose input and output arrays have a single batch dimension.
         n_nonbatch: The number of final axes that should not be collapsed and reformed. May be specified
-            separately for each
+            separately for each parameter.
     """
-    n_params = len(inspect.signature(func).parameters)
+    def decorator(f):
+        n_params = len(inspect.signature(f).parameters)
 
-    if isinstance(n_nonbatch, int):
-        n_nonbatch = (n_nonbatch,) * n_params
-    elif isinstance(n_nonbatch, Sequence):
-        assert len(n_nonbatch) == n_params, (
-            "if n_nonbatch is a sequence it must have the same length "
-            "as the number of parameters of func"
-        )
+        if isinstance(n_nonbatch, int):
+            n_nonbatch_tuple = (n_nonbatch,) * n_params
+        elif isinstance(n_nonbatch, Sequence):
+            assert len(n_nonbatch) == n_params, (
+                "if n_nonbatch is a sequence it must have the same length "
+                "as the number of parameters of func"
+            )
+            n_nonbatch_tuple = tuple(n_nonbatch)
 
-    @wraps(func)
-    def wrapper(*args):
-        batch_shapes = set([arr.shape[:-n] for arr, n in zip(args, n_nonbatch)])
-        assert len(batch_shapes) == 1, (
-            "all input arrays must have the same batch shape"
-        )
-        batch_shape = batch_shapes.pop()
+        @wraps(f)
+        def wrapper(*args):
+            batch_shapes = set([arr.shape[:-n] for arr, n in zip(args, n_nonbatch_tuple)])
+            assert len(batch_shapes) == 1, (
+                "all input arrays must have the same batch shape"
+            )
+            batch_shape = batch_shapes.pop()
 
-        result = func(*tuple(
-            arr.reshape((-1, *arr.shape[-n:])) for arr, n in zip(args, n_nonbatch)
-        ))
+            result = f(*tuple(
+                arr.reshape((-1, *arr.shape[-n:])) for arr, n in zip(args, n_nonbatch_tuple)
+            ))
 
-        # Assume that the return type can be any PyTree of arrays, which share the same first
-        # collapsed batch dimension
-        return jt.map(
-            lambda arr: arr.reshape((*batch_shape, *arr.shape[1:])),
-            result,
-        )
+            # Assume that the return type can be any PyTree of arrays, which share the same first
+            # collapsed batch dimension
+            return jt.map(
+                lambda arr: arr.reshape((*batch_shape, *arr.shape[1:])),
+                result,
+            )
 
-    return wrapper
+        return wrapper
+    
+    if func is None:
+        # Called with parentheses: @batch_reshape() or @batch_reshape(n_nonbatch=2)
+        return decorator
+    else:
+        # Called without parentheses: @batch_reshape
+        return decorator(func)
 
 
 def unkwargkey(f):

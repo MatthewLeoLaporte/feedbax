@@ -764,7 +764,7 @@ class TaskTrainer(eqx.Module):
         opt_state = jtu.tree_unflatten(treedef_opt_state, flat_opt_state)
 
         (_, (losses, states)), grads = eqx.filter_value_and_grad(
-            _grad_wrap_abstract_loss(loss_func), has_aux=True
+            grad_wrap_abstract_loss(loss_func), has_aux=True
         )(
             diff_model,
             static_model,
@@ -956,13 +956,29 @@ def init_task_trainer_history(
     )
 
 
-def _grad_wrap_simple_loss_func(loss_func: Callable[[Array, Array], Float]):
+def grad_wrap_simple_loss_func(
+    loss_func: Callable[[Array, Array], Float],
+    nan_safe: bool = False,
+):
     """Wraps a loss function taking output and target arrays, to one taking a model
     and its input, along with the target array.
 
     In particular, this is used to transform the a loss function representation of a
     loss function as a norm, to a function that plays nicely with `jax.grad`.
+
+    If `nan_safe == True`, the wrapped function will replace NaNs in the inputs before
+    performing the forward pass, to ensure that gradients remain finite. In that case,
+    a NaN-safe loss function (like `nan_safe_mse`) should be used, so that the respective
+    training examples are excluded from the aggregate loss.
     """
+
+    if nan_safe:
+        def _forward_pass(model, X):
+            X_cleaned = jnp.nan_to_num(X, nan=0.0)
+            return model(X_cleaned)
+    else:
+        def _forward_pass(model, X):
+            return model(X)
 
     @wraps(loss_func)
     def wrapper(
@@ -970,9 +986,7 @@ def _grad_wrap_simple_loss_func(loss_func: Callable[[Array, Array], Float]):
         X,
         y,
     ) -> Tuple[float, LossDict]:
-        loss = loss_func(model(X), y)
-
-        return loss
+        return loss_func(_forward_pass(model, X), y)
 
     return wrapper
 
@@ -986,24 +1000,36 @@ class SimpleTrainer(eqx.Module):
     """
 
     loss_func: Callable[[eqx.Module, Array, Array], Float] = field(
-        default=_grad_wrap_simple_loss_func(loss.mse),
+        default=grad_wrap_simple_loss_func(loss.mse),
     )
     optimizer: optax.GradientTransformation = field(
         default=optax.sgd(1e-2),
     )
 
-    def __call__(self, model, X, y, n_iter=100):
+    def __call__(self, model, X, y, n_iter=100, progress_bar=True):
         opt_state = self.optimizer.init(model)
 
-        for _ in _tqdm(range(n_iter)):
-            loss, grads = jax.value_and_grad(self.loss_func)(model, X, y)
-            updates, opt_state = self.optimizer.update(grads, opt_state)
-            model = eqx.apply_updates(model, updates)
+        # @eqx.filter_jit
+        def train_step(current_model, current_opt_state, x_batch, y_batch):
+            loss_value, grads = jax.value_and_grad(self.loss_func)(current_model, x_batch, y_batch)
+            updates, new_opt_state = self.optimizer.update(grads, current_opt_state)
+            new_model = eqx.apply_updates(current_model, updates)
+            return new_model, new_opt_state, loss_value
+
+        if progress_bar:
+            train_iter = _tqdm(range(n_iter), desc="Training")
+        else:
+            train_iter = range(n_iter)
+
+        for _ in train_iter:
+            model, opt_state, loss = train_step(model, opt_state, X, y)
+            if progress_bar:
+                train_iter.set_postfix(loss=f"{loss:.4f}")
 
         return model
 
 
-def _grad_wrap_abstract_loss(loss_func: AbstractLoss):
+def grad_wrap_abstract_loss(loss_func: AbstractLoss):
     """Wraps a task loss function taking state to a `grad`-able one taking a model.
 
     It is convenient to first define the loss function in terms of a

@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from itertools import zip_longest
 import logging
 from math import sqrt
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional, TypeVar
 
 import equinox as eqx
 from feedbax._tree import apply_to_filtered_leaves, tree_infer_batch_size, tree_prefix_expand, tree_take, tree_unzip
@@ -42,6 +42,9 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+T = TypeVar('T')
 
 
 pio.templates.default = "plotly_white"
@@ -169,7 +172,7 @@ def profiles(
                 np.moveaxis(x, keep_axis, 0),
                 (x.shape[keep_axis], -1, x.shape[-1]),
             ),
-            vars_
+            vars_,
         )
 
     if colors is None:
@@ -1136,7 +1139,7 @@ def trajectories_2D(
         "Number of legend labels should match size of the `colorscale_axis`"
     )
 
-    ts = np.arange(vars_[0].shape[-2])
+    ts = np.arange(jt.leaves(vars_)[0].shape[-2])
 
     subplots_data = jt.leaves(
         tree_zip(vars_, var_labels),
@@ -1257,11 +1260,10 @@ def trajectories_2D(
         if mean_scatter_kws is not None:
             mean_kwargs |= mean_scatter_kws
 
-        # Loop over subplots/variables
-        for i, mean_var in enumerate(mean_vars):
-            # Loop over the color groups (LDict values, e.g. train pert std)
+        def _plot_mean_var(i, mean_var):
+            # Loop over the axis=0 color groups
             for j, curves in enumerate(mean_var):
-                # Loop over any curves within this color group (due to mean_exclude_axes)
+                # Loop over axis=1 curves within this color group (due to mean_exclude_axes)
                 for k, xy in enumerate(curves):
                     # Get the true color index for this curve
                     if mean_color_idxs is not None:
@@ -1288,6 +1290,8 @@ def trajectories_2D(
                         **mean_kwargs,
                     )
                     fig.add_trace(trace, row=1, col=i + 1)
+
+        jt.map(_plot_mean_var, *zip(*enumerate(jt.leaves(mean_vars))))
 
     fig.for_each_trace(lambda trace: trace.update(
         hovertemplate=(

@@ -205,7 +205,7 @@ epy = [
 [[package]]
 name = "feedbax"
 version = "0.1.2"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "crc32c" },
     { name = "diffrax" },

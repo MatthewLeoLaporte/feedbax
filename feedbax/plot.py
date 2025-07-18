@@ -1161,7 +1161,14 @@ def get_high_contrast_neutral_shade():
 
 
 def circular_hist(
-    x, ax=None, bins=16, density=True, offset=0, gaps=True, mean=False
+    x, 
+    ax=None, 
+    bins=16, 
+    density=True, 
+    offset=0, 
+    gaps=True, 
+    mean=False, 
+    normalize_by_other=None,
 ):
     """Produce a circular histogram of angles on ax.
 
@@ -1223,6 +1230,11 @@ def circular_hist(
 
     # Compute width of each bin
     widths = np.diff(bins)
+    
+    if normalize_by_other is not None:
+        n_other, _ = np.histogram(normalize_by_other, bins=bins)
+        n = n / n_other
+        n = n / n.sum()
 
     # By default plot frequency proportional to area
     if density:

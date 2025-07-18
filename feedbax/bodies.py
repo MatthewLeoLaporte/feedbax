@@ -145,7 +145,9 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
         def _build_feedback_channel(spec: ChannelSpec):
             assert spec.noise_func is not None
             return Channel(
-                delay=spec.delay, noise_func=spec.noise_func, init_value=0.
+                delay=spec.delay,
+                noise_func=spec.noise_func,
+                init_value=0.
             ).change_input(
                 spec.where(example_mechanics_state)
             )
@@ -158,7 +160,9 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
         self._feedback_specs = feedback_specs
 
         self.efferent_channel = Channel(
-            delay=motor_delay, noise_func=motor_noise_func, init_value=0.
+            delay=motor_delay,
+            noise_func=motor_noise_func,
+            init_value=0.
         ).change_input(
             self.net.init(key=jr.PRNGKey(0)).output
         )
