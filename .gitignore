@@ -2,6 +2,7 @@
 COMMIT_MSG.txt
 
 .specstory
+codebase.md
 
 # Markdown copies of example notebooks
 # (They are meant to make search-replace easier)

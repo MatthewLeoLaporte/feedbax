@@ -40,5 +40,9 @@
     "explorer.autoReveal": false,
     "scm.autoReveal": false,
     "files.trimTrailingWhitespace": true,
-    "claudeCodeChat.permissions.yoloMode": false
+    "claudeCodeChat.permissions.yoloMode": false,
+    "python.analysis.exclude": [
+        "archive"
+    ],
+    "python.analysis.typeCheckingMode": "standard"
 }

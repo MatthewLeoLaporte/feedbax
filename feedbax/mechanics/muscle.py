@@ -37,57 +37,6 @@ from feedbax.state import StateBounds
 logger = logging.getLogger(__name__)
 
 
-class ActivationFilter(AbstractDynamicalSystem):
-    """First-order model of the calcium dynamics of muscle activation.
-
-    Attributes:
-        tau_act: The activation time constant.
-        tau_deact: The deactivation time constant.
-    """
-
-    tau_act: float
-    tau_deact: float
-
-    # def __init__(
-    #     self,
-    #     tau_act: float = 50,  # [ms]
-    #     tau_deact: float = 66
-    # ):
-    #     """
-    #     Arguments:
-    #         tau_act: The activation time constant.
-    #         tau_deact: The deactivation time constant.
-    #     """
-    #     self.tau_act = tau_act
-    #     self.tau_deact = tau_deact
-    #     self._tau_diff
-
-    def vector_field(
-        self,
-        t: Scalar,
-        state: Array,
-        input: Array,
-    ):
-        """Return the time derivative of activation."""
-        activation = state
-        tau = self.tau_deact + self._tau_diff * jnp.where(
-            input < activation, input, jnp.zeros(1)
-        )
-        d_activation = (input - activation) / tau
-
-        return d_activation
-
-    @cached_property
-    def _tau_diff(self):
-        return self.tau_act - self.tau_deact
-
-    @property
-    def input_size(self):
-        return 1
-
-    def init(self, *, key: PRNGKeyArray) -> Array:
-        raise NotImplementedError("No state PyTree associated with ActivationFilter.")
-
 
 class MuscleState(Module):
     """Type of state PyTree operated on by [`AbstractMuscle`][feedbax.mechanics.muscle.AbstractMuscle]

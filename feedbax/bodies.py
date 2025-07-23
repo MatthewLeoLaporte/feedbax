@@ -7,7 +7,7 @@
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 import logging
-from typing import TYPE_CHECKING, Any, Optional, Self, Union, overload
+from typing import TYPE_CHECKING, Any, Optional, Self, TypeVar, Union, overload
 
 import equinox as eqx
 from equinox import Module
@@ -19,6 +19,7 @@ import jax.tree as jt
 from jaxtyping import Array, PRNGKeyArray, PyTree
 
 from feedbax.channel import Channel, ChannelSpec, ChannelState
+from feedbax.filters import FilterState, FirstOrderFilter
 from feedbax.intervene import AbstractIntervenor
 from feedbax._model import AbstractModel, MultiModel
 from feedbax.intervene.schedule import ArgIntervenors, ModelIntervenors, StageNameStr
@@ -36,6 +37,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+T = TypeVar("T")
+
+
 class SimpleFeedbackState(Module):
     """Type of state PyTree operated on by [`SimpleFeedback`][feedbax.bodies.SimpleFeedback] instances.
 
@@ -43,12 +47,15 @@ class SimpleFeedbackState(Module):
         mechanics: The state PyTree for a `Mechanics` instance.
         net: The state PyTree for a staged neural network.
         feedback: A PyTree of state PyTrees for each feedback channel.
+        efferent: The state PyTree for the efferent channel.
+        force_filter: The state PyTree for the force filter.
     """
 
     mechanics: "MechanicsState"
     net: "NetworkState"
     feedback: PyTree[ChannelState]
     efferent: ChannelState
+    force_filter: "FilterState"
 
 
 def _convert_feedback_spec(
@@ -99,6 +106,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
     mechanics: "Mechanics"
     feedback_channels: MultiModel[ChannelState]
     efferent_channel: Channel
+    force_lp: Optional[FirstOrderFilter]
     _feedback_specs: PyTree[ChannelSpec]
     intervenors: ModelIntervenors[SimpleFeedbackState]
 
@@ -113,6 +121,8 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
         ),
         motor_delay: int = 0,
         motor_noise_func: Callable[[PRNGKeyArray, Array], Array] = Normal(),
+        tau_rise: float = 0.0,
+        tau_decay: float = 0.0,
         intervenors: Optional[ArgIntervenors] = None,
         *,
         key: Optional[PRNGKeyArray] = None,
@@ -125,8 +135,9 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
                 and noise on the states available to the neural network.
             motor_delay: The number of time steps to delay the neural network output
                 sent to the mechanical model.
-            motor_noise_std: The standard deviation of the Gaussian noise added to
-                the neural network's output.
+            motor_noise_func: Function that adds noise to the neural network's output.
+            tau_rise: Rise time constant for the force filter (seconds).
+            tau_decay: Decay time constant for the force filter (seconds).
             intervenors: [Intervenors][feedbax.intervene.AbstractIntervenor] to add
                 to the model at construction time.
         """
@@ -168,6 +179,20 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
             self.net.init(key=jr.PRNGKey(0)).output
         )
 
+        # Build the filter module
+        # If both tau values are zero, use identity transform
+        if tau_rise == 0.0 and tau_decay == 0.0:
+            self.force_lp = None
+        else:
+            self.force_lp = FirstOrderFilter(
+                tau_rise=tau_rise,
+                tau_decay=tau_decay,
+                dt=mechanics.dt,  # Use same time step as mechanics
+                init_value=0.0,
+            ).change_input(
+                self.efferent_channel.init(key=jr.PRNGKey(0)).output
+            )
+
     # def update_feedback(
     #     self,
     #     input: "MechanicsState",
@@ -190,42 +215,57 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
         """Specifies the stages of the model in terms of state operations."""
         Stage = ModelStage[Self, SimpleFeedbackState]
 
-        return OrderedDict(
-            {
-                "update_feedback": Stage(
-                    callable=lambda self: self.feedback_channels,
-                    where_input=lambda input, state: jt.map(
-                        lambda spec: spec.where(state.mechanics),
-                        self._feedback_specs,
-                        is_leaf=lambda x: isinstance(x, ChannelSpec),
+        spec = OrderedDict({
+            "update_feedback": Stage(
+                callable=lambda self: self.feedback_channels,
+                where_input=lambda input, state: jt.map(
+                    lambda spec: spec.where(state.mechanics),
+                    self._feedback_specs,
+                    is_leaf=lambda x: isinstance(x, ChannelSpec),
+                ),
+                where_state=lambda state: state.feedback,
+            ),
+            "nn_step": Stage(
+                callable=lambda self: self.net,
+                where_input=lambda input, state: (
+                    input,
+                    # Get the output state for each feedback channel.
+                    jt.map(
+                        lambda state: state.output,
+                        state.feedback,
+                        is_leaf=lambda x: isinstance(x, ChannelState),
                     ),
-                    where_state=lambda state: state.feedback,
                 ),
-                "nn_step": Stage(
-                    callable=lambda self: self.net,
-                    where_input=lambda input, state: (
-                        input,
-                        # Get the output state for each feedback channel.
-                        jt.map(
-                            lambda state: state.output,
-                            state.feedback,
-                            is_leaf=lambda x: isinstance(x, ChannelState),
-                        ),
-                    ),
-                    where_state=lambda state: state.net,
-                ),
-                "update_efferent": Stage(
-                    callable=lambda self: self.efferent_channel,
-                    where_input=lambda input, state: state.net.output,
-                    where_state=lambda state: state.efferent,
-                ),
+                where_state=lambda state: state.net,
+            ),
+            "update_efferent": Stage(
+                callable=lambda self: self.efferent_channel,
+                where_input=lambda input, state: state.net.output,
+                where_state=lambda state: state.efferent,
+            ),
+        })
+
+        if self.force_lp is None:
+            return spec | OrderedDict({
                 "mechanics_step": Stage(
                     callable=lambda self: self.mechanics,
                     where_input=lambda input, state: state.efferent.output,
                     where_state=lambda state: state.mechanics,
                 ),
-            }
-        )
+            })
+        else:
+            return spec | OrderedDict({
+                "filter_force": Stage(
+                    callable=lambda self: self.force_lp,
+                    where_input=lambda input, state: state.efferent.output,
+                    where_state=lambda state: state.force_filter,
+                ),
+                "mechanics_step": Stage(
+                    callable=lambda self: self.mechanics,
+                    where_input=lambda input, state: state.force_filter.output,
+                    where_state=lambda state: state.mechanics,
+                ),
+            })
 
     def init(
         self,
@@ -233,14 +273,19 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
         key: PRNGKeyArray,
     ) -> SimpleFeedbackState:
         """Return a default state for the model."""
-        keys = jr.split(key, 4)
+        keys = jr.split(key, 5)
+
+        if self.force_lp is not None:
+            force_filter_init_state = self.force_lp.init(key=keys[4])
+        else:
+            force_filter_init_state = FilterState(output=None, solver=None)
 
         return SimpleFeedbackState(
             mechanics=self.mechanics.init(key=keys[0]),
-            # TODO: in case of a wrapped network (i.e. not an `AbstractModel`) a different initialization is needed!
             net=self.net.init(key=keys[1]),  # type: ignore
             feedback=self.feedback_channels.init(key=keys[2]),
             efferent=self.efferent_channel.init(key=keys[3]),
+            force_filter=force_filter_init_state,
         )
 
     @property
@@ -269,6 +314,7 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
                 is_leaf=is_module,
             ),
             efferent=self.efferent_channel.memory_spec,
+            force_filter=self.force_lp.memory_spec if self.force_lp is not None else FilterState(output=True, solver=False),
         )
 
     @property
@@ -283,6 +329,10 @@ class SimpleFeedback(AbstractStagedModel[SimpleFeedbackState]):
                 is_leaf=is_module,
             ),
             efferent=self.efferent_channel.bounds,
+            force_filter=self.force_lp.bounds if self.force_lp is not None else StateBounds(
+                low=FilterState(output=None, solver=None),
+                high=FilterState(output=None, solver=None)
+            ),
         )
 
     @staticmethod
