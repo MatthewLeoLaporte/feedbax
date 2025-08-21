@@ -44,5 +44,10 @@
     "python.analysis.exclude": [
         "archive"
     ],
-    "python.analysis.typeCheckingMode": "standard"
+    "python.analysis.typeCheckingMode": "standard",
+    "python.analysis.include": [
+        "feedbax",
+        "tests",
+        "examples"
+    ]
 }

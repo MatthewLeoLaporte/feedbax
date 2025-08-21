@@ -53,11 +53,11 @@ class FirstOrderFilter(AbstractDynamicalSystem[FilterState]):
         input: PyTree[jax.Array],           # command (same shape as output)
     ) -> FilterState:
         """Return the time derivative of the filtered signal."""
-        tau = jnp.where(input >= state, self.tau_rise, self.tau_decay)
+        tau = jnp.where(input >= state.output, self.tau_rise, self.tau_decay)
         return eqx.tree_at(
             lambda state: state.output,
             state,
-            (input - state) / tau
+            (input - state.output) / tau
         )
 
     @cached_property
@@ -76,13 +76,17 @@ class FirstOrderFilter(AbstractDynamicalSystem[FilterState]):
             self._term,
             0,
             self.dt,
-            state.output,
+            state,
             input_.value,
             state.solver,
             made_jump=False,
         )
 
-        return FilterState(output=output_state, solver=solver_state)
+        return eqx.tree_at(
+            lambda state: state.solver,
+            output_state,
+            solver_state,
+        )
 
     @property
     def memory_spec(self):

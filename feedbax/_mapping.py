@@ -207,14 +207,42 @@ class WhereDict(AbstractTransformedOrderedDict[str, Callable[[PyTree], Any], T])
                              "a callable, or a tuple of a callable and a string")
         return key
 
-    # def __tree_pp__(self, **kwargs):
-    #     return tree_pp(
-    #         {
-    #             _wheredict_key_repr(where_key): v
-    #             for _, (where_key, v) in self.store.items()
-    #         },
-    #         **kwargs,
-    #     )
+    def _repr_with_indent(self, level: int) -> str:
+        cls_name       = self.__class__.__name__
+        current_indent = "  " * level
+        item_indent    = "  " * (level + 1)
 
-    def __repr__(self):
-        return eqx.tree_pformat(self)
+        # empty case
+        if not self.store:
+            return f"{cls_name}({{}})"
+
+        item_strings = []
+        for key, value in self.items():
+            # turn your callable/tuple into a clean key repr (no extra quotes)
+            key_repr = repr(_wheredict_key_repr(key))
+
+            # capture repr(value) and split into lines
+            raw_lines = repr(value).splitlines() or [""]
+            if len(raw_lines) > 1:
+                # first line as‐is, indent subsequent
+                first, *rest = raw_lines
+                rest_indented = "\n".join(f"{item_indent}{ln}" for ln in rest)
+                value_repr = f"{first}\n{rest_indented}"
+            else:
+                value_repr = raw_lines[0]
+
+            item_strings.append(f"{item_indent}{key_repr}: {value_repr},")
+
+        body = "\n".join(item_strings)
+        return (
+            f"{cls_name}({{\n"
+            f"{body}\n"
+            f"{current_indent}}})"
+        )
+
+    def __repr__(self) -> str:
+        # now just forward to your own indent‐printer
+        return self._repr_with_indent(0)
+
+
+

@@ -25,10 +25,9 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "crc32c>=2.7.1",
     "diffrax>=0.7.0",
@@ -43,11 +42,30 @@ dependencies = [
     "seaborn>=0.13.2",
     "tensorboardx>=2.6.2.2",
     "tqdm>=4.67.1",
+    "jax-cookbook",
 ]
 
 [project.urls]
 repository = "https://github.com/mlprt/feedbax"
 documentation = "https://docs.lprt.ca/feedbax"
+
+[tool.uv]
+config-settings = { editable-mode = "compat" }
+
+#! TODO: Replace at release
+[tool.uv.sources.jax-cookbook]
+path = "../../../05 Utils/jax-cookbook"
+editable = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+packages = ["feedbax"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["feedbax"]
 
 [tool.pyright]
 include = ["feedbax"]
@@ -63,12 +81,3 @@ target-version = ['py310', 'py311', 'py312']
 include = 'feedbax\/.*\.pyi?$'
 line-length = 88
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.sdist]
-packages = ["feedbax"]
-
-[tool.hatch.build.targets.wheel]
-packages = ["feedbax"]

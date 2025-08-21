@@ -299,7 +299,8 @@ def is_module(element: Any) -> bool:
     return isinstance(element, Module)
 
 
-is_none = lambda x: x is None
+def is_none(x):
+    return x is None
 
 
 def nested_dict_update(dict_, *args, make_copy: bool = True):
@@ -436,6 +437,82 @@ def attr_str_tree_to_where_func(tree: PyTree[str]) -> Callable:
     return where_func
 
 
+def nan_bypass(
+    func: Optional[Callable[..., Any]] = None,
+    *,
+    axis: int = 0,
+    argnums: int | Sequence[int] | None = None,
+    filler: float = 0.0,          
+):
+    """
+    Decorator that temporarily fills slices along `axis` which contain *any*
+    NaN in the positional arguments indexed by `argnums`, applies the wrapped
+    function to the remaining data, and finally re-inserts NaNs.
+
+    Args:
+    axis: axis along which rows/segments are considered
+    argnums: which positional arguments to check for NaNs.
+        - int      → single argument
+        - sequence → those indices
+        - None     → all positional arguments
+    filler: the value used to overwrite NaN rows before calling `func`
+    """
+    # allow decorator to be used with/without parentheses
+    if func is not None and callable(func):
+        return nan_bypass(axis=axis, argnums=argnums, filler=filler)(func)
+
+    def decorator(f: Callable[..., Any]):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            # 1. Resolve which arguments we have to inspect
+            if argnums is None:
+                argnums_tuple = tuple(range(len(args)))
+            elif isinstance(argnums, int):
+                argnums_tuple = (argnums,)
+            else:
+                argnums_tuple = tuple(argnums)
+
+            # 2. Build a boolean mask of slices that contain *any* NaN
+            def _row_has_nan(arr: jnp.ndarray) -> jnp.ndarray:
+                red_axes = tuple(i for i in range(arr.ndim) if i != axis)
+                return jnp.any(jnp.isnan(arr), axis=red_axes)
+
+            nan_mask = jnp.zeros(args[argnums_tuple[0]].shape[axis], dtype=bool)
+            for i in argnums_tuple:
+                nan_mask = nan_mask | _row_has_nan(args[i])
+
+            # 3. Broadcast mask to each target arg & replace with fillers
+            def _replace_rows(arr: jnp.ndarray) -> jnp.ndarray:
+                # make mask broadcastable to arr
+                bmask = jnp.expand_dims(
+                    nan_mask,
+                    axis=tuple(ax for ax in range(arr.ndim) if ax != axis),
+                )
+                return jnp.where(bmask, jnp.zeros_like(arr) + filler, arr)
+
+            safe_args = list(args)
+            for i in argnums_tuple:
+                safe_args[i] = _replace_rows(args[i])
+
+            # 4. Call the original function
+            out = f(*safe_args, **kwargs)
+
+            # 5. Re-insert NaNs in the output on masked rows
+            def _restore_rows(arr: jnp.ndarray) -> jnp.ndarray:
+                bmask = jnp.expand_dims(
+                    nan_mask,
+                    axis=tuple(ax for ax in range(arr.ndim) if ax != axis),
+                )
+                nan_arr = jnp.full_like(arr, jnp.nan)
+                return jnp.where(bmask, nan_arr, arr)
+
+            return jt.map(_restore_rows, out)
+
+        return wrapper
+
+    return decorator
+
+
 def batch_reshape(
     func: Optional[Callable[[Shaped[Array, "batch *n"]], Shaped[Array, "batch *m"]]] = None,
     *,
@@ -507,12 +584,14 @@ def batch_reshape(
             )
             batch_shape = batch_shapes.pop()
 
-            result = f(*tuple(
+            # Reshape to collapse batch dimensions
+            collapsed_args = tuple(
                 arr.reshape((-1, *arr.shape[-n:])) for arr, n in zip(args, n_nonbatch_tuple)
-            ))
+            )
 
-            # Assume that the return type can be any PyTree of arrays, which share the same first
-            # collapsed batch dimension
+            result = f(*collapsed_args)
+
+            # Reshape back to original batch structure
             return jt.map(
                 lambda arr: arr.reshape((*batch_shape, *arr.shape[1:])),
                 result,
