@@ -122,7 +122,7 @@ def profiles(
     keep_axis: Optional[PyTree[int, "T ..."]] = None,
     mode: Literal["std", "curves"] = "std",
     stride_curves: int = 1,
-    timesteps: Optional[PyTree[Float[Array, "timestep"], "T"]] = None,
+    timesteps: Optional[PyTree[Float[Array, " timestep"], "T"]] = None,
     varname: str = "Value",
     legend_title: Optional[str] = None,
     labels: Optional[PyTree[str, "T"]] = None,
@@ -299,9 +299,7 @@ def profiles(
 
     fig.update_layout(legend_itemsizing="constant")
 
-    fig.update_layout(
-        legend_title_text=("Condition" if legend_title is None else legend_title)
-    )
+    fig.update_layout(legend_title_text=("Condition" if legend_title is None else legend_title))
 
     if layout_kws is not None:
         fig.update_layout(layout_kws)
@@ -384,8 +382,7 @@ def loss_history(
     colors_rgb, _ = convert_colors_to_same_type(colors, colortype="rgb")  # type: ignore
 
     colors_dict = {
-        label: "rgb(0,0,0)" if label == "Total" else color
-        for label, color in zip(dfs, colors_rgb)
+        label: "rgb(0,0,0)" if label == "Total" else color for label, color in zip(dfs, colors_rgb)
     }
 
     for i, label in enumerate(reversed(dfs)):
@@ -544,9 +541,7 @@ def activity_sample_units(
     elif len(activities.shape) != 3:
         raise ValueError("Invalid shape for ")
 
-    unit_idxs = jr.choice(
-        key, np.arange(activities.shape[-1]), (n_samples,), replace=False
-    )
+    unit_idxs = jr.choice(key, np.arange(activities.shape[-1]), (n_samples,), replace=False)
     if unit_includes is not None:
         unit_idxs = np.concatenate([unit_idxs, np.array(unit_includes)])
     unit_idxs = np.sort(unit_idxs)
@@ -671,14 +666,12 @@ def unshare_axes(fig: go.Figure):
 def effector_trajectories(
     states: SimpleFeedbackState | PyTree[Float[Array, "trial time ..."] | Any],
     where_data: Optional[
-        Callable[[PyTree[Array]], tuple[Shaped[Array, "*batch trial time xy=2"]]]
+        Callable[[PyTree[Array]], Sequence[Shaped[Array, "*batch trial time xy=2"], ...]]
     ] = None,
     var_labels: Optional[tuple[str, ...]] = None,
     step: int = 1,  # plot every step-th trial
     trial_specs: Optional["TaskTrialSpec"] = None,
-    endpoints: Optional[
-        tuple[Float[Array, "trial xy=2"], Float[Array, "trial xy=2"]]
-    ] = None,
+    endpoints: Optional[tuple[Float[Array, "trial xy=2"], Float[Array, "trial xy=2"]]] = None,
     straight_guides: bool = False,
     workspace: Optional[Float[Array, "bounds=2 xy=2"]] = None,
     cmap_name: Optional[str] = None,
@@ -730,14 +723,11 @@ def effector_trajectories(
     """
     var_labels_ = var_labels
 
+    vars_tuple: tuple[Shaped[Array, "*batch trial time xy=2"], ...]
     if where_data is not None:
-        vars_tuple = where_data(states)
+        vars_tuple = tuple(where_data(states))
         if var_labels is None:
             var_labels = where_func_to_attr_str_tree(where_data)
-
-        if isinstance(vars_tuple, (Array, np.ndarray)):
-            vars_tuple = (vars_tuple,)
-            var_labels_ = (var_labels,)
 
     elif isinstance(states, SimpleFeedbackState):
         vars_tuple = (
@@ -901,10 +891,7 @@ def effector_trajectories(
     # Constrain the axes of each subplot to be scaled equally.
     # That is, keep square aspect ratios.
     fig.update_layout(
-        {
-            f"yaxis{i}": dict(scaleanchor=f"x{i}")
-            for i in [""] + list(range(2, n_vars + 1))
-        }
+        {f"yaxis{i}": dict(scaleanchor=f"x{i}") for i in [""] + list(range(2, n_vars + 1))}
     )
 
     # Omit the "var=" part of each subplot title
@@ -1002,9 +989,7 @@ def _compute_colors(
     if colorscale_axis < 0:
         colorscale_axis += len(base_shape)
     if colorscale_axis >= len(base_shape) - 2:
-        raise ValueError(
-            f"colorscale_axis {colorscale_axis} points to a non-batch dimension"
-        )
+        raise ValueError(f"colorscale_axis {colorscale_axis} points to a non-batch dimension")
 
     C_full = base_shape[colorscale_axis]
     if stride != 1:
@@ -1024,9 +1009,7 @@ def _compute_colors(
         color_sequence = np.array(converted[0] * C).reshape(C, -1)
     else:
         if len(colors) != C:
-            raise ValueError(
-                "Length of colors must match number of color groups (after stride)"
-            )
+            raise ValueError("Length of colors must match number of color groups (after stride)")
         converted, _ = convert_colors_to_same_type(list(colors))
         color_sequence = np.array(converted)
 
@@ -1061,18 +1044,14 @@ def _prepare_leaf_arrays(
     axis0 = colorscale_axis if colorscale_axis >= 0 else full_ndim + colorscale_axis
 
     # move colorscale axis to front and collapse the rest into a single axis of curves
-    x = np.reshape(
-        np.moveaxis(x, axis0, 0), (x.shape[axis0], -1, *x.shape[-2:])
-    )  # (C, K, time, d)
+    x = np.reshape(np.moveaxis(x, axis0, 0), (x.shape[axis0], -1, *x.shape[-2:]))  # (C, K, time, d)
     cb = np.reshape(colors_broadcast, (colors_broadcast.shape[0], -1, 3))  # (C,K,3)
     ci = np.reshape(color_idxs, (color_idxs.shape[0], -1))  # (C,K)
 
     # subsample per-group curves if requested
     K = x.shape[1]
     if n_curves_max is not None and K > n_curves_max:
-        idxs_sample = np.random.choice(
-            np.arange(K), n_curves_max, replace=False
-        ).astype(int)
+        idxs_sample = np.random.choice(np.arange(K), n_curves_max, replace=False).astype(int)
         x = x[:, idxs_sample]
         cb = cb[:, idxs_sample]
         ci = ci[:, idxs_sample]
@@ -1268,16 +1247,18 @@ def trajectories[T](
     mean_scatter_kws = dict(mean_scatter_kws)
 
     vars_norm = _normalize_vars(subplots_data)
-    subplots_data_list = jt.leaves(vars_norm, is_leaf=eqx.is_array)
+    subplots_data_list = list(vars_norm)
+    if not all(isinstance(x, (Array, np.ndarray)) for x in subplots_data_list):
+        raise TypeError(
+            "`subplots_data` must be a flat sequence-like container of JAX or numpy arrays."
+        )
 
     subplot_titles_list = _normalize_collection_arg(
         subplots_data,
         "subplots_data",
         subplot_titles,
         arg_label="subplot_titles",
-        default_fn=lambda vars_: [
-            f"<b>{label}</b>" for label in jt.leaves(tree_labels(vars_))
-        ],
+        default_fn=lambda vars_: [f"<b>{label}</b>" for label in jt.leaves(tree_labels(vars_))],
         leaf_type=str,
     )
 
@@ -1325,13 +1306,8 @@ def trajectories[T](
     # Constrain 2D subplots to square aspect
     for i, t in enumerate(types, start=1):
         if t == "xy":
-            fig.update_layout(
-                {
-                    f"yaxis{'' if i == 1 else i}": dict(
-                        scaleanchor=f"x{'' if i == 1 else i}"
-                    )
-                }
-            )
+            d = "" if i == 1 else i
+            fig.update_layout({f"yaxis{d}": dict(scaleanchor=f"x{d}")})
 
     # Map from 3D subplot order to scene id (scene, scene2, ...)
     scene_indices = {}
@@ -1342,9 +1318,7 @@ def trajectories[T](
             scene_indices[i] = "" if scene_count == 1 else str(scene_count)
 
     # Only show legends on the first subplot to avoid duplication
-    def _legend_on_this_leaf(
-        leaf_idx: int, show_mean: bool, group_first_seen: set, group_idx: int
-    ):
+    def _legend_on_this_leaf(leaf_idx: int, show_mean: bool, group_first_seen: set, group_idx: int):
         if leaf_idx != 0 or show_mean:
             return False
         if group_idx in group_first_seen:
@@ -1371,9 +1345,7 @@ def trajectories[T](
         ) = _compute_colors(var.shape, colors, colorscale, colorscale_axis, stride)
         # If stride requested, slice the data along the colorscale axis so groups match colors
         if stride_idxs is not None:
-            axis0 = (
-                colorscale_axis if colorscale_axis >= 0 else var.ndim + colorscale_axis
-            )
+            axis0 = colorscale_axis if colorscale_axis >= 0 else var.ndim + colorscale_axis
             var = np.take(var, stride_idxs, axis=axis0)
 
         # Legend labels per-leaf
@@ -1404,13 +1376,15 @@ def trajectories[T](
             common = dict(
                 name=label,
                 showlegend=showlegend_flag,
+                line_color=color_str,
+                marker_color=color_str,
+                legendgroup=str(label),
             ) | dict(skws)
             if is_2d:
                 trace = go.Scatter(
                     **common,
                     x=curve[..., 0],
                     y=curve[..., 1],
-                    line=dict(color=color_str),
                     customdata=np.concatenate(
                         [
                             ts[:, None],
@@ -1418,7 +1392,6 @@ def trajectories[T](
                         ],
                         axis=-1,
                     ),
-                    **skws,
                 )
             else:
                 trace = go.Scatter3d(
@@ -1426,11 +1399,7 @@ def trajectories[T](
                     x=curve[:, 0],
                     y=curve[:, 1],
                     z=curve[:, 2],
-                    line_color=color_str,
-                    marker_color=color_str,
                     customdata=ts[:, None],
-                    legendgroup=str(label),
-                    **skws,
                 )
             fig.add_trace(trace, row=1, col=col)
 
@@ -1465,9 +1434,7 @@ def trajectories[T](
         for i_curve, curve in enumerate(var_flat):
             group_idx = int(color_idxs_flat[i_curve])
             label = legend_labels_local[group_idx]
-            showlegend = _legend_on_this_leaf(
-                leaf_idx, show_mean, group_first_seen, group_idx
-            )
+            showlegend = _legend_on_this_leaf(leaf_idx, show_mean, group_first_seen, group_idx)
             color_str = colors_rgb[i_curve]
             _add_curve_trace(curve, color_str, label, showlegend)
             _add_endpoint_marker(curve, color_str, label, "start")
@@ -1481,14 +1448,18 @@ def trajectories[T](
                 y_max = np.nanmax(all_y)
                 y_rng = y_max - y_min
                 pad = y_rng * padding_factor if y_rng > 0 else 0.1
-                fig.update_yaxes(range=[y_min - pad, y_max + pad], row=1, col=col)
+                # fig.update_yaxes(autorange=True, row=1, col=col)
+                fig.update_yaxes(
+                    domain=[None, None],
+                    range=[y_min - pad, y_max + pad],
+                    row=1,
+                    col=col,
+                )
                 fig.update_xaxes(autorange=True, row=1, col=col)
 
         # mean trajectories (per-leaf)
         if show_mean:
-            axis0 = (
-                colorscale_axis if colorscale_axis >= 0 else var.ndim + colorscale_axis
-            )
+            axis0 = colorscale_axis if colorscale_axis >= 0 else var.ndim + colorscale_axis
             mean_arr = _mean_over_axes(var, axis0, mean_exclude_axes)  # (C, M, time, d)
             for j in range(mean_arr.shape[0]):  # color groups
                 label = legend_labels_local[j]
@@ -1508,9 +1479,7 @@ def trajectories[T](
                     if is_2d:
                         trace = go.Scatter(x=xy[..., 0], y=xy[..., 1], **kwargs)
                     else:
-                        trace = go.Scatter3d(
-                            x=xy[:, 0], y=xy[:, 1], z=xy[:, 2], **kwargs
-                        )
+                        trace = go.Scatter3d(x=xy[:, 0], y=xy[:, 1], z=xy[:, 2], **kwargs)
 
                     fig.add_trace(trace, row=1, col=col)
 
@@ -1576,19 +1545,13 @@ def trajectories[T](
 
     # Hover templates (keep minimal to avoid mismatched customdata)
     def _apply_hover(trace: BaseTraceType):
-        if (
-            isinstance(trace, go.Scatter)
-            and getattr(trace, "customdata", None) is not None
-        ):
+        if isinstance(trace, go.Scatter) and getattr(trace, "customdata", None) is not None:
             trace.update(
                 hovertemplate=(
                     "Time step: %{customdata[0]}<br>x: %{x:.2f}<br>y: %{y:.2f}<br><extra></extra>"
                 )
             )
-        elif (
-            isinstance(trace, go.Scatter3d)
-            and getattr(trace, "customdata", None) is not None
-        ):
+        elif isinstance(trace, go.Scatter3d) and getattr(trace, "customdata", None) is not None:
             trace.update(
                 hovertemplate=(
                     "Time step: %{customdata[0]}<br>x: %{x:.2f}<br>y: %{y:.2f}<br>z: %{z:.2f}<br><extra></extra>"
@@ -1596,8 +1559,6 @@ def trajectories[T](
             )
 
     fig.for_each_trace(_apply_hover)
-
-    fig.update_layout(legend_itemsizing="constant")
 
     if legend_title is not None:
         fig.update_layout(legend_title_text=legend_title)
@@ -1610,7 +1571,7 @@ def trajectories[T](
 
 # Backwards compatible wrappers
 def trajectories_2D[T](
-    vars_: SeqOfT[Float[Array | np.ndarray, "*trial time dims"], T],
+    vars_: SeqOfT[Float[Array, "*trial time dims"], T] | SeqOfT[np.ndarray, T],
     var_labels: Optional[SeqOfT[str, T]] = None,
     axes_labels: Optional[AxesLabels | SeqOfT[AxesLabels, T]] = None,
     var_endpoint_ms: int = 0,
@@ -1692,9 +1653,7 @@ def trajectories_3D(
 ):
     vars_ = [traj]
 
-    endpoints = (
-        "all" if (endpoint_symbol is not None or start_symbol is not None) else "none"
-    )
+    endpoints = "all" if (endpoint_symbol is not None or start_symbol is not None) else "none"
     if start_symbol is None:
         start_marker_kws = None
     else:

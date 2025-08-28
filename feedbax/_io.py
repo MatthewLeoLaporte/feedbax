@@ -8,23 +8,22 @@ TODO:
 :license: Apache 2.0. See LICENSE for details.
 """
 
-from collections.abc import Callable
-from datetime import datetime
 import json
 import logging
 import os
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+import equinox as eqx
 import jax.random as jr
 import jax.tree as jt
-from jaxtyping import Array, PyTree
-import equinox as eqx
 import numpy as np
+from jaxtyping import Array, PyTree
 
-from feedbax.misc import git_commit_id, nested_dict_update
 from feedbax._tree import apply_to_filtered_leaves, is_type
-
+from feedbax.misc import git_commit_id, nested_dict_update
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,7 @@ def save(
     tree: PyTree[eqx.Module],
     hyperparameters: Optional[dict] = None,
     sort_keys: bool = True,
-    dump_func: Callable = lambda hps: json.dumps(hps, sort_keys=sort_keys),
+    dump_func: Callable = lambda hps: json.dumps(hps, sort_keys=True),
 ) -> None:
     """Save a PyTree to disk along with hyperparameters used to generate it.
 
@@ -60,15 +59,13 @@ def save(
         try:
             hyperparameter_str = dump_func(hyperparameters)
         except TypeError as e:
-            from rnns_learn_robust_motor_policies.tree_utils import pp
-            pp(hyperparameters)
-            raise(e)
+            raise (e)
         f.write((hyperparameter_str + "\n").encode())
         eqx.tree_serialise_leaves(f, tree)
 
     filesize = os.path.getsize(path)
 
-    logger.info(f"Wrote PyTree to {path} ({filesize / 1024 ** 2:.1f} MiB)")
+    logger.info(f"Wrote PyTree to {path} ({filesize / 1024**2:.1f} MiB)")
 
 
 def load(
@@ -85,9 +82,7 @@ def load(
             arguments `hyperparameters` which `save` may have saved to the same
             file. It must take a keyword argument `key`.
     """
-    tree, _ = load_with_hyperparameters(
-        path=path, setup_func=setup_func, **kwargs
-    )
+    tree, _ = load_with_hyperparameters(path=path, setup_func=setup_func, **kwargs)
     return tree
 
 
@@ -122,8 +117,6 @@ def load_with_hyperparameters(
         try:
             tree = setup_func(**hyperparameters, key=jr.PRNGKey(0))
         except TypeError as e:
-            from rnns_learn_robust_motor_policies.tree_utils import pp
-            pp(hyperparameters)
             raise e
         tree = eqx.tree_deserialise_leaves(f, tree, **kwargs)
 
