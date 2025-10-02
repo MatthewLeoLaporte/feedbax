@@ -25,13 +25,13 @@ TODO:
 :license: Apache 2.0. See LICENSE for details.
 """
 
-from abc import abstractmethod
-from collections.abc import Callable, Sequence
 import copy
-from dataclasses import fields
-from functools import cached_property
 import logging
 import operator as op
+from abc import abstractmethod
+from collections.abc import Callable, Sequence
+from dataclasses import fields
+from functools import cached_property
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -42,12 +42,12 @@ from typing import (
 )
 
 import equinox as eqx
-from equinox import AbstractVar, Module, field
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import jax.tree_util as jtu
 import jax.tree as jt
+import jax.tree_util as jtu
+from equinox import AbstractVar, Module, field
 from jaxtyping import Array, ArrayLike, Float, PRNGKeyArray, PyTree
 
 from feedbax.noise import Normal
@@ -60,6 +60,7 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
 
 class AbstractIntervenorInput(Module):
     """Base class for PyTrees of intervention parameters.
@@ -94,8 +95,8 @@ class AbstractIntervenor(Module, Generic[StateT, InputT]):
     """
 
     params: AbstractVar[InputT]
-    in_where: AbstractVar[Callable[[StateT], PyTree[ArrayLike, "T"]]]
-    out_where: AbstractVar[Callable[[StateT], PyTree[ArrayLike, "S"]]]
+    in_where: AbstractVar[Callable[[StateT], PyTree[ArrayLike, " T"]]]
+    out_where: AbstractVar[Callable[[StateT], PyTree[ArrayLike, " S"]]]
     operation: AbstractVar[Callable[[ArrayLike, ArrayLike], ArrayLike]]
 
     @classmethod
@@ -150,7 +151,8 @@ class AbstractIntervenor(Module, Generic[StateT, InputT]):
             other = self.transform(params, self.in_where(state), key=key)
             return jt.map(
                 lambda x, y: self.operation(x, params.scale * y),
-                substate, other,
+                substate,
+                other,
             )
 
         return jax.lax.cond(
@@ -167,12 +169,22 @@ class AbstractIntervenor(Module, Generic[StateT, InputT]):
     def transform(
         self,
         params: InputT,
-        substate_in: PyTree[ArrayLike, "T"],
+        substate_in: PyTree[ArrayLike, " T"],
         *,
         key: PRNGKeyArray,
-    ) -> PyTree[ArrayLike, "S"]:
+    ) -> PyTree[ArrayLike, " S"]:
         """Transforms the input substate to produce an altered output substate."""
         ...
+
+
+# InputsT = TypeVar("InputsT", bound=Sequence[AbstractIntervenorInput])
+
+
+# class MultiIntervenor(Generic[StateT, InputsT]):
+#     component_params: InputsT
+#     operation: Callable[[ArrayLike, ArrayLike], ArrayLike] = op.add
+
+#     def __call__(self, inputs: InputsT, state: StateT, *, key: PRNGKeyArray) -> StateT:
 
 
 class CurlFieldParams(AbstractIntervenorInput):
@@ -184,6 +196,7 @@ class CurlFieldParams(AbstractIntervenorInput):
         amplitude: The amplitude of the force field. Negative is clockwise, positive
             is counterclockwise.
     """
+
     scale: float = 1.0
     amplitude: float = 1.0
     active: bool = True
@@ -246,9 +259,7 @@ class FixedField(AbstractIntervenor["MechanicsState", FixedFieldParams]):
     """
 
     params: FixedFieldParams = FixedFieldParams()
-    in_where: Callable[["MechanicsState"], Any] = (
-        lambda state: state.effector
-    )
+    in_where: Callable[["MechanicsState"], Any] = lambda state: state.effector
     out_where: Callable[["MechanicsState"], Float[Array, "... ndim=2"]] = (
         lambda state: state.effector.force
     )
@@ -290,21 +301,21 @@ class AddNoise(AbstractIntervenor[StateT, AddNoiseParams]):
 
     params: AddNoiseParams = AddNoiseParams()
     noise_func: Callable[[PRNGKeyArray, Array], Array] = Normal()
-    in_where: Callable[[StateT], PyTree[Array, "T"]] = lambda state: state
-    out_where: Callable[[StateT], PyTree[Array, "T"]] = lambda state: state
+    in_where: Callable[[StateT], PyTree[Array, " T"]] = lambda state: state
+    out_where: Callable[[StateT], PyTree[Array, " T"]] = lambda state: state
     operation: Callable[[ArrayLike, ArrayLike], ArrayLike] = op.add
 
     def transform(
         self,
         params: AddNoiseParams,
-        substate_in: PyTree[Array, "T"],
+        substate_in: PyTree[Array, " T"],
         *,
         key: PRNGKeyArray,
-    ) -> PyTree[Array, "T"]:
+    ) -> PyTree[Array, " T"]:
         """Return a PyTree of scaled noise arrays with the same structure/shapes as
         `substate_in`."""
         noise = jt.map(
-            lambda x:  self.noise_func(key, x),
+            lambda x: self.noise_func(key, x),
             substate_in,
         )
         return noise
@@ -323,6 +334,7 @@ class NetworkIntervenorParams(AbstractIntervenorInput):
         Note that `unit_spec` may be a single array—which is just a single-leaf PyTree
         of arrays—when `out_where` of the intervenor is also a single array.
     """
+
     scale: float = 1.0
     unit_spec: Optional[PyTree] = None
     active: bool = True
@@ -340,22 +352,17 @@ class NetworkClamp(AbstractIntervenor["NetworkState", NetworkIntervenorParams]):
     """
 
     params: NetworkIntervenorParams = NetworkIntervenorParams()
-    in_where: Callable[["NetworkState"], PyTree[Array, "T"]] = (
-        lambda state: state.hidden
-    )
-    out_where: Callable[["NetworkState"], PyTree[Array, "T"]] = (
-        lambda state: state.hidden
-    )
+    in_where: Callable[["NetworkState"], PyTree[Array, " T"]] = lambda state: state.hidden
+    out_where: Callable[["NetworkState"], PyTree[Array, " T"]] = lambda state: state.hidden
     operation: Callable[[ArrayLike, ArrayLike], ArrayLike] = lambda x, y: y
 
     def transform(
         self,
         params: NetworkIntervenorParams,
-        substate_in: PyTree[Array, "T"],
+        substate_in: PyTree[Array, " T"],
         *,
-        key: PRNGKeyArray
-    ) -> PyTree[Array, "T"]:
-
+        key: PRNGKeyArray,
+    ) -> PyTree[Array, " T"]:
         return jt.map(
             lambda x, y: jnp.where(jnp.isnan(y), x, y),
             substate_in,
@@ -375,12 +382,8 @@ class NetworkConstantInput(AbstractIntervenor["NetworkState", NetworkIntervenorP
     """
 
     params: NetworkIntervenorParams = NetworkIntervenorParams()
-    in_where: Callable[["NetworkState"], PyTree[Array, "T"]] = (
-        lambda state: state.hidden
-    )
-    out_where: Callable[["NetworkState"], PyTree[Array, "T"]] = (
-        lambda state: state.hidden
-    )
+    in_where: Callable[["NetworkState"], PyTree[Array, " T"]] = lambda state: state.hidden
+    out_where: Callable[["NetworkState"], PyTree[Array, " T"]] = lambda state: state.hidden
     operation: Callable[[ArrayLike, ArrayLike], ArrayLike] = op.add
 
     def transform(
@@ -389,7 +392,7 @@ class NetworkConstantInput(AbstractIntervenor["NetworkState", NetworkIntervenorP
         substate_in: "NetworkState",
         *,
         key: PRNGKeyArray,
-    ) -> PyTree[Array, "T"]:
+    ) -> PyTree[Array, " T"]:
         return jt.map(jnp.nan_to_num, params.unit_spec)
 
 
@@ -419,17 +422,17 @@ class ConstantInput(AbstractIntervenor[StateT, ConstantInputParams]):
     """
 
     params: ConstantInputParams = ConstantInputParams()
-    in_where: Callable[[StateT], PyTree[Array, "T"]] = lambda state: state
-    out_where: Callable[[StateT], PyTree[Array, "T"]] = lambda state: state
+    in_where: Callable[[StateT], PyTree[Array, " T"]] = lambda state: state
+    out_where: Callable[[StateT], PyTree[Array, " T"]] = lambda state: state
     operation: Callable[[ArrayLike, ArrayLike], ArrayLike] = op.add
 
     def transform(
         self,
         params: ConstantInputParams,
-        substate_in: PyTree[Array, "T"],
+        substate_in: PyTree[Array, " T"],
         *,
         key: PRNGKeyArray,
-    ) -> PyTree[Array, "T"]:
+    ) -> PyTree[Array, " T"]:
         return params.arrays
 
 
@@ -439,18 +442,18 @@ class CopyParams(AbstractIntervenorInput):
 
 
 class Copy(AbstractIntervenor[StateT, CopyParams]):
-    in_where: Callable[[StateT], PyTree[Array, "T"]]
-    out_where: Callable[[StateT], PyTree[Array, "T"]]
+    in_where: Callable[[StateT], PyTree[Array, " T"]]
+    out_where: Callable[[StateT], PyTree[Array, " T"]]
     operation: Callable[[ArrayLike, ArrayLike], ArrayLike] = lambda x, y: y
     params: CopyParams = CopyParams()
 
     def transform(
         self,
         params: CopyParams,
-        substate_in: PyTree[Array, "T"],
+        substate_in: PyTree[Array, " T"],
         *,
         key: PRNGKeyArray,
-    ) -> PyTree[Array, "T"]:
+    ) -> PyTree[Array, " T"]:
         return substate_in
 
 

@@ -7,13 +7,14 @@
 # TODO: Separate this into its own repo, and make it a dependency
 # TODO: Eliminate `tree_*` prefixes
 
-from collections import namedtuple
-from collections.abc import Callable, Sequence, Hashable
-from functools import partial
 import functools
 import itertools
 import logging
 import string
+from collections import namedtuple
+from collections.abc import Callable, Hashable, Sequence
+from dataclasses import dataclass
+from functools import partial
 from typing import Any, Optional, Tuple, TypeVar, TypeVarTuple, Union, get_type_hints
 
 import equinox as eqx
@@ -22,12 +23,11 @@ import jax.numpy as jnp
 import jax.random as jr
 import jax.tree as jt
 import jax.tree_util as jtu
-from jaxtyping import Array, ArrayLike, PRNGKeyArray, PyTree, PyTreeDef, Shaped
 import numpy as np
+from jaxtyping import Array, ArrayLike, PRNGKeyArray, PyTree, PyTreeDef, Shaped
 
 from feedbax._progress import _tqdm, _tqdm_write
-from feedbax.misc import unique_generator, is_module, is_none, unzip2
-
+from feedbax.misc import is_module, is_none, unique_generator, unzip2
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def first_non_none(*args):
     return None
 
 
-def anyf(*funcs: Callable[..., bool]) -> Callable[..., bool]:
+def anyf(*fns: Callable[..., bool]) -> Callable[..., bool]:
     """Returns a function that returns the logical union of boolean functions.
 
     This is useful when we want to satisfy any of a number of `is_leaf`-like conditions
@@ -57,7 +57,7 @@ def anyf(*funcs: Callable[..., bool]) -> Callable[..., bool]:
     return lambda *args, **kwargs: any(f(*args, **kwargs) for f in funcs)
 
 
-def allf(*funcs: Callable[..., bool]) -> Callable[..., bool]:
+def allf(*fns: Callable[..., bool]) -> Callable[..., bool]:
     """Returns a function that returns the logical intersection of boolean functions."""
     return lambda *args, **kwargs: all(f(*args, **kwargs) for f in funcs)
 
@@ -88,10 +88,11 @@ def apply_to_filtered_leaves(filter_spec=None, is_leaf=None):
             filtered, other = eqx.partition(tree, filter_spec, is_leaf=is_leaf)
             updated = func(filtered, *args, **kwargs)
 
-            #? `other` comes first because leaves may have become subtrees in `updated`
+            # ? `other` comes first because leaves may have become subtrees in `updated`
             return eqx.combine(other, updated, is_leaf=is_leaf)
 
         return wrapper
+
     return decorator
 
 
@@ -100,11 +101,13 @@ def apply_to_filtered_leaves(filter_spec=None, is_leaf=None):
 def tree_filter_map(f, tree, filter_func):
     def map_func(x):
         return f(x) if filter_func(x) else x
+
     return jt.map(map_func, tree)
 
 
 def filter_spec_leaves(
-    tree: PyTree[Any, "T"], leaf_func: Callable,
+    tree: PyTree[Any, "T"],
+    leaf_func: Callable,
 ) -> PyTree[bool, "T"]:
     """Returns a filter specification for tree leaves matching `leaf_func`."""
     filter_spec = jt.map(lambda _: False, tree)
@@ -265,9 +268,7 @@ def tree_set(
         A PyTree with the same structure as `tree`, where the array leaves of `items` have been inserted as the `idx`-th elements of the corresponding array leaves of `tree`.
     """
     arrays = eqx.filter(tree, eqx.is_array)
-    vals_update, other_update = eqx.partition(
-        values, jt.map(lambda x: x is not None, arrays)
-    )
+    vals_update, other_update = eqx.partition(values, jt.map(lambda x: x is not None, arrays))
     arrays_update = jt.map(lambda xs, x: xs.at[idx].set(x), arrays, vals_update)
     return eqx.combine(arrays_update, other_update)
 
@@ -280,6 +281,7 @@ def tree_set_scalar(
     axis: int = 0,
 ) -> PyTree[Array, "T"]:
     """Do an out-of-place assignment to the same indices of each array in a PyTree."""
+
     def set_value(x):
         # Create the appropriate index tuple for the given axis
         idx_tuple = tuple(idx if i == axis else slice(None) for i in range(x.ndim))
@@ -361,6 +363,7 @@ def make_named_tuple_subclass(name):
     which we can select with `is_leaf`, but we don't want to define the fields
     of a `namedtuple`.
     """
+
     def __repr__(self):
         return f"{name}{tuple.__repr__(self)}"
 
@@ -383,6 +386,7 @@ def make_named_dict_subclass(name):
 
     This is useful if we want a particular kind of dict that we can select with `is_leaf`.
     """
+
     def __repr__(self):
         return f"{name}({dict.__repr__(self)})"
 
@@ -445,11 +449,7 @@ def move_level_to_outside(tree, level_type):
     new_treedef = functools.reduce(lambda def1, def2: def1.compose(def2), leveldefs)
 
     leaves = jt.leaves(tree, is_leaf=is_type(leaf_type))
-    new_leaves = [
-        x for xs in
-        [leaves[i::arity] for i in range(arity)]
-        for x in xs
-    ]
+    new_leaves = [x for xs in [leaves[i::arity] for i in range(arity)] for x in xs]
 
     return jt.unflatten(new_treedef, new_leaves)
 
@@ -510,16 +510,12 @@ def tree_stack_inner(tree: PyTree, is_leaf: Optional[Callable] = None):
 
 def tree_sum_squares(tree: PyTree[Array]) -> ArrayLike:
     """Sum the sums of squares of the leaves of a PyTree."""
-    return jt.reduce(
-        lambda x, y: x + y, jt.map(lambda x: jnp.sum(x**2), tree)
-    )
+    return jt.reduce(lambda x, y: x + y, jt.map(lambda x: jnp.sum(x**2), tree))
 
 
 def tree_sum_n_features(tree: PyTree[Array]) -> int:
     """Returns the sum the sizes of the last dimensions of all leaves."""
-    return jt.reduce(
-        lambda x, y: x + y, jt.map(lambda x: x.shape[-1], tree)
-    )
+    return jt.reduce(lambda x, y: x + y, jt.map(lambda x: x.shape[-1], tree))
 
 
 def _tree_map(
@@ -565,7 +561,7 @@ def tree_map_module(
 
 
 # Horizontal rule
-HR = u'\u2500' * 80
+HR = "\u2500" * 80
 
 
 # TODO: Use a host callback so this can be wrapped in JAX transformations.
@@ -594,6 +590,7 @@ def tree_map_tqdm(
     """
     n_leaves = len(jt.leaves(tree, is_leaf=is_leaf))
     pbar = _tqdm(total=n_leaves, desc=label)
+
     def _f(leaf, label, *rest):
         if label is not None:
             pbar.set_description(f"Processing leaf: {label}")
@@ -603,9 +600,10 @@ def tree_map_tqdm(
         if verbose:
             _tqdm_write(f"\n{HR}\n")
         else:
-            _tqdm_write(f"\n")
+            _tqdm_write("\n")
         pbar.update(1)
         return result
+
     if labels is None:
         pbar.set_description("Processing tree leaves")
         labels = jt.map(lambda _: None, tree, is_leaf=is_leaf)
@@ -661,8 +659,7 @@ def tree_zip(
     is_leaf=None,
     zip_cls=tuple,
 ) -> PyTree[Tuple[Any, ...], "T"]:
-    """Zips a sequence of PyTrees into a PyTree of tuples.
-    """
+    """Zips a sequence of PyTrees into a PyTree of tuples."""
     return jt.map(lambda *x: zip_cls(x), *trees, is_leaf=is_leaf)
 
 
@@ -684,17 +681,17 @@ def tree_zip_flat(
     *trees: PyTree[Any, "T"],
     is_leaf=None,
 ) -> PyTree[Tuple[Any, ...], "T"]:
-    """Returns an iterator over the `n`-tuples of matching leaves from `n` PyTrees.
-    """
+    """Returns an iterator over the `n`-tuples of matching leaves from `n` PyTrees."""
     trees_flat = [jt.flatten(tree, is_leaf=is_leaf) for tree in trees]
     return zip(*trees_flat)
 
 
 def tree_prefix_expand(prefix: PyTree, tree: PyTree, is_leaf: Optional[Callable] = None):
-    """Expands a prefix of a PyTree to have the same structure as the PyTree.
-    """
+    """Expands a prefix of a PyTree to have the same structure as the PyTree."""
+
     def expand_leaf(leaf, subtree):
         return jt.map(lambda _: leaf, subtree, is_leaf=is_leaf)
+
     return jt.map(expand_leaf, prefix, tree, is_leaf=is_leaf)
 
 
@@ -702,7 +699,7 @@ def _character_generator():
     # Generates the infinite sequence of strings: a, b, c, ..., z, aa, ab, ac, ..., az, ba, ...
     for length in itertools.count(1):
         for combo in itertools.product(string.ascii_lowercase, repeat=length):
-            yield ''.join(combo)
+            yield "".join(combo)
 
 
 def _n_unique_strs(n):
@@ -744,40 +741,114 @@ def tree_call(
     return eqx.combine(callables_values, other_values, is_leaf=is_leaf)
 
 
+# def tree_call_with_keys(
+#     tree: PyTree[Any, "T"],
+#     *args: Any,
+#     key: PRNGKeyArray,
+#     exclude: Callable = lambda _: False,
+#     is_leaf: Optional[Callable] = None,
+#     **kwargs: Any,
+# ) -> PyTree[Any, "T"]:
+#     """Returns a tree of the return values of a PyTree's callable leaves.
+
+#     !!! Note ""
+#         Every callable leaf is passed the same `*args, **kwargs`.
+
+#         Non-callable leaves, callable leaves that satisfy `exclude`, are passed through
+#         as-is.
+
+#     Arguments:
+#         tree: Any PyTree.
+#         *args: Positional arguments to pass to each callable leaf.
+#         exclude: A function that returns `True` for any callable leaf that
+#             should not be called.
+#         **kwargs: Keyword arguments to pass to each callable leaf.
+#     """
+#     callables, other_values = eqx.partition(
+#         tree,
+#         lambda x: isinstance(x, Callable) and not exclude(x),
+#         is_leaf=is_leaf,
+#     )
+#     callables_values = jt.map(
+#         lambda x, key: x(*args, **kwargs, key=key),
+#         callables,
+#         random_split_like_tree(key, callables, is_leaf=is_leaf),
+#         is_leaf=is_leaf,
+#     )
+#     return eqx.combine(callables_values, other_values, is_leaf=is_leaf)
+
+
 def tree_call_with_keys(
     tree: PyTree[Any, "T"],
     *args: Any,
     key: PRNGKeyArray,
     exclude: Callable = lambda _: False,
     is_leaf: Optional[Callable] = None,
+    shared_key: PRNGKeyArray | None = None,
+    use_shared: Optional[Callable[[Any], bool]] = None,
     **kwargs: Any,
 ) -> PyTree[Any, "T"]:
-    """Returns a tree of the return values of a PyTree's callable leaves.
-
-    !!! Note ""
-        Every callable leaf is passed the same `*args, **kwargs`.
-
-        Non-callable leaves, callable leaves that satisfy `exclude`, are passed through
-        as-is.
-
-    Arguments:
-        tree: Any PyTree.
-        *args: Positional arguments to pass to each callable leaf.
-        exclude: A function that returns `True` for any callable leaf that
-            should not be called.
-        **kwargs: Keyword arguments to pass to each callable leaf.
     """
+    Calls callable leaves with RNG keys.
+    - If `shared_key` and `use_shared` are provided, leaves where `use_shared(leaf)` is True
+      receive `shared_key`; others receive per-leaf split keys.
+    """
+
+    # 1) Separate callables vs non-callables (respecting `exclude`)
     callables, other_values = eqx.partition(
         tree,
         lambda x: isinstance(x, Callable) and not exclude(x),
         is_leaf=is_leaf,
     )
+
+    # 2) Keys for callables (default: per-leaf split)
+    keys_tree = random_split_like_tree(key, callables, is_leaf=is_leaf)
+
+    # 3) Decide which key each leaf should get
+    if shared_key is not None and use_shared is not None:
+
+        def choose_key(fn, perleaf_key):
+            return shared_key if use_shared(fn) else perleaf_key
+
+        keys_tree = jt.map(choose_key, callables, keys_tree, is_leaf=is_leaf)
+
+    callables = unwrap_shared_markers(callables)
+
+    # 4) Call each leaf with its chosen key
     callables_values = jt.map(
         lambda x, key: x(*args, **kwargs, key=key),
-        callables, random_split_like_tree(key, callables, is_leaf=is_leaf),
+        callables,
+        keys_tree,
         is_leaf=is_leaf,
     )
+    # 5) Recombine
     return eqx.combine(callables_values, other_values, is_leaf=is_leaf)
+
+
+@dataclass(frozen=True)
+class _SharedKeyWrapper:
+    fn: Callable  # the original callable
+
+
+def mark_shared(tree, *wheres):
+    """Wrap leaves selected by `wheres` so they receive the shared key."""
+
+    def _wrap(fn):
+        return _SharedKeyWrapper(fn)
+
+    out = tree
+    for where in wheres:
+        out = eqx.tree_at(where, out, jt.map(_wrap, out, is_leaf=callable))
+    return out
+
+
+def is_marked_shared(x) -> bool:
+    return isinstance(x, _SharedKeyWrapper)
+
+
+def unwrap_shared_markers(tree):
+    # Optional: if you want to remove wrappers post-call (not strictly needed if wrappers aren't returned)
+    return jt.map(lambda x: x.fn if isinstance(x, _SharedKeyWrapper) else x, tree)
 
 
 def tree_array_bytes(tree: PyTree, duplicates: bool = False) -> int:
@@ -791,13 +862,11 @@ def tree_array_bytes(tree: PyTree, duplicates: bool = False) -> int:
     arrays = eqx.filter(tree, eqx.is_array)
     if not duplicates:
         flat, treedef = jt.flatten(arrays)
-        arrays = jt.unflatten(
-            treedef,
-            list(unique_generator(flat, replace_duplicates=True))
-        )
+        arrays = jt.unflatten(treedef, list(unique_generator(flat, replace_duplicates=True)))
     array_bytes = jt.map(lambda x: x.nbytes, arrays)
     array_bytes_int_leaves = [x for x in jt.leaves(array_bytes) if x is not None]
     return sum(array_bytes_int_leaves)
+
 
 def tree_struct_bytes(tree: PyTree[jax.ShapeDtypeStruct]) -> int:
     """Returns the total bytes of memory implied by a PyTree of `ShapeDtypeStruct`s."""
@@ -828,13 +897,14 @@ def _path_to_label(path: Sequence[BuiltInKeyEntry], join_with: str) -> str:
     return join_with.join(map(lambda k: str(_node_key_to_value(k)), path))
 
 
+#! TODO: Remove. Now in `jax_cookbook`
 def tree_labels(
-    tree: PyTree[Any, 'T'],
-    join_with: str = '_',
+    tree: PyTree[Any, "T"],
+    join_with: str = "_",
     append_leaf: bool = False,
     path_idx: int | slice = slice(None),
     is_leaf: Optional[Callable[..., bool]] = None,
-) -> PyTree[str, 'T']:
+) -> PyTree[str, "T"]:
     """Return a PyTree of labels based on each leaf's key path.
 
     !!! Note ""
@@ -894,18 +964,15 @@ def tree_labels(
     paths, leaves = zip(*leaves_with_path)
     labels = [_path_to_label(path[path_idx], join_with) for path in paths]
     if append_leaf:
-        labels = [
-            join_with.join([label, str(leaf)])
-            for label, leaf in zip(labels, leaves)
-        ]
+        labels = [join_with.join([label, str(leaf)]) for label, leaf in zip(labels, leaves)]
     return jt.unflatten(treedef, labels)
 
 
 def tree_key_tuples(
-    tree: PyTree[Any, 'T'],
+    tree: PyTree[Any, "T"],
     keys_to_strs: bool = False,
     is_leaf: Optional[Callable[..., bool]] = None,
-) -> PyTree[str, 'T']:
+) -> PyTree[str, "T"]:
     leaves_with_path, treedef = jtu.tree_flatten_with_path(tree, is_leaf=is_leaf)
     paths, leaves = zip(*leaves_with_path)
     if keys_to_strs:
@@ -931,11 +998,11 @@ def _equal_or_allclose(a, b, rtol, atol):
 
 
 def tree_paths_of_equal_leaves(
-    tree: PyTree[Any, 'T'],
+    tree: PyTree[Any, "T"],
     rtol: float = 1e-5,
     atol: float = 1e-8,
     is_leaf: Optional[Callable[..., bool]] = None,
-) -> PyTree[set[tuple[BuiltInKeyEntry]], 'T']:
+) -> PyTree[set[tuple[BuiltInKeyEntry]], "T"]:
     """
     Returns a PyTree with the same structure, where leaves are sets of paths of other
     leaves that are equal.
@@ -952,7 +1019,8 @@ def tree_paths_of_equal_leaves(
 
     equal_paths = [
         set(
-            paths[j] for j in range(len(leaves))
+            paths[j]
+            for j in range(len(leaves))
             if i != j and _equal_or_allclose(leaves[i], leaves[j], rtol, atol)
         )
         for i in range(len(leaves))
@@ -962,21 +1030,19 @@ def tree_paths_of_equal_leaves(
 
 
 def tree_labels_of_equal_leaves(
-    tree: PyTree[Any, 'T'],
+    tree: PyTree[Any, "T"],
     rtol: float = 1e-5,
     atol: float = 1e-8,
-    join_with: str = '_',
+    join_with: str = "_",
     is_leaf: Optional[Callable[..., bool]] = None,
-) -> PyTree[set[str], 'T']:
+) -> PyTree[set[str], "T"]:
     """Returns a PyTree with the same structure, where leaves are sets of labels of
     other leaves that are equal.
 
     Does pairwise equality comparisons between all leaves, using `(j)np.allclose` in
     case of arrays.
     """
-    tree_equal_paths = tree_paths_of_equal_leaves(
-        tree, is_leaf=is_leaf, rtol=rtol, atol=atol
-    )
+    tree_equal_paths = tree_paths_of_equal_leaves(tree, is_leaf=is_leaf, rtol=rtol, atol=atol)
     return jt.map(
         lambda xs: set(_path_to_label(x, join_with) for x in xs),
         tree_equal_paths,
@@ -984,9 +1050,7 @@ def tree_labels_of_equal_leaves(
     )
 
 
-def tree_infer_batch_size(
-    tree: PyTree, exclude: Callable[..., bool] = lambda _ : False
-) -> int:
+def tree_infer_batch_size(tree: PyTree, exclude: Callable[..., bool] = lambda _: False) -> int:
     """Return the size of the first dimension of a tree's array leaves.
 
     Raise an error if any of the array leaves differ in the size of their first
@@ -1002,9 +1066,7 @@ def tree_infer_batch_size(
     # TODO: Allow for `in_axes`-like control over which arrays will be checked
 
     arrays, treedef = jt.flatten(eqx.filter(tree, eqx.is_array), is_leaf=exclude)
-    array_lens: list[int | None] = [
-        arr.shape[0] if not exclude(arr) else None for arr in arrays
-    ]
+    array_lens: list[int | None] = [arr.shape[0] if not exclude(arr) else None for arr in arrays]
     array_lens_unique = set(x for x in array_lens if x is not None)
     if not len(array_lens_unique) == 1:
         tree_array_lens = jt.unflatten(treedef, array_lens)

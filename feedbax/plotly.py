@@ -24,6 +24,7 @@ from typing import (
 import equinox as eqx
 import jax.random as jr
 import jax.tree as jt
+import jax_cookbook.tree as jtree
 import numpy as np
 import plotly.colors as plc
 import plotly.express as px
@@ -117,6 +118,78 @@ def profile(
     return fig
 
 
+# --- helpers ---
+
+
+def _wrap_to_pi(x):
+    TAU = 2 * np.pi
+    return (x + np.pi) % TAU - np.pi
+
+
+def _unwrap_time(x, axis: int = -1):
+    """Unwrap a phase/angle sequence along `axis` to remove ±2π jumps."""
+    dx = np.diff(x, axis=axis)
+    dx_mod = (dx + np.pi) % (2 * np.pi) - np.pi  # bring diffs to (-π, π]
+    shifts = dx_mod - dx  # multiples of 2π to add
+    corr = np.cumsum(shifts, axis=axis)
+    pad_shape = list(x.shape)
+    pad_shape[axis] = 1
+    corr = np.concatenate([np.zeros(pad_shape, dtype=x.dtype), corr], axis=axis)
+    return x + corr
+
+
+def _unwrap_around(ref, x):
+    """Shift `x` by multiples of 2π so it stays near `ref`."""
+    return ref + ((x - ref + np.pi) % (2 * np.pi) - np.pi)
+
+
+def _maybe_unwrap(mean, ub, lb, mode):
+    if mode != "circular":
+        return mean, ub, lb
+    mean_u = _unwrap_time(mean, axis=-1)
+    ub_u = _unwrap_around(mean_u, _unwrap_time(ub, axis=-1))
+    lb_u = _unwrap_around(mean_u, _unwrap_time(lb, axis=-1))
+    return mean_u, ub_u, lb_u
+
+
+def _agg_standard(x, axis, n_std_plot: int):
+    """Standard (linear) aggregation: (mean, upper, lower)."""
+    mean = np.nanmean(x, axis=axis)
+    std = np.nanstd(x, axis=axis)
+    ub = mean + n_std_plot * std
+    lb = mean - n_std_plot * std
+    return mean, ub, lb
+
+
+def _agg_circular(x, axis, n_std_plot: int):
+    """Circular aggregation on angles in radians: (mean, upper, lower).
+
+    Mean is the vector (circular) mean; 'std' is derived from mean resultant length:
+        sigma = sqrt(-2 ln R)
+    Upper/lower are mean ± n*sigma, wrapped back to (-π, π].
+    """
+    # mask NaNs
+    mask = np.isfinite(x)
+    # sums of sin/cos with NaNs suppressed
+    S = np.sum(np.where(mask, np.sin(x), 0.0), axis=axis)
+    C = np.sum(np.where(mask, np.cos(x), 0.0), axis=axis)
+    n = np.sum(mask, axis=axis)
+
+    mean = np.arctan2(S, C)
+
+    # mean resultant length (avoid divide-by-zero / log(0))
+    R = np.sqrt(S**2 + C**2) / np.maximum(n, 1e-12)
+    R = np.clip(R, 1e-12, 1.0)
+
+    sigma = np.sqrt(-2.0 * np.log(R))
+    ub = _wrap_to_pi(mean + n_std_plot * sigma)
+    lb = _wrap_to_pi(mean - n_std_plot * sigma)
+    return mean, ub, lb
+
+
+AggMode: TypeAlias = Literal["standard", "circular"]
+
+
 def profiles(
     vars_: PyTree[Float[Array, "*batch timestep"], "T"],
     keep_axis: Optional[PyTree[int, "T ..."]] = None,
@@ -133,11 +206,16 @@ def profiles(
     layout_kws: Optional[dict] = None,
     scatter_kws: Optional[dict] = None,
     curves_kws: Optional[dict] = None,
+    agg_mode: AggMode = "standard",
     fig: Optional[go.Figure] = None,
 ) -> go.Figure:
-    """Plot 1D state profiles as lines with standard deviation bars.
+    """Plot 1D state profiles as lines with error bands.
 
-    `keep_axis` will retain one dimension of data, and plot one mean+/-std curve for each entry in that axis
+    `keep_axis` will retain one dimension of data, and plot one mean+/-error curve for
+    each entry in that axis.
+
+    `agg_mode` selects aggregation per node: "standard" uses linear mean±std,
+    "circular" uses circular mean and circular std-derived bands.
     """
     if fig is None:
         fig = go.Figure()
@@ -167,20 +245,22 @@ def profiles(
             is_leaf=lambda x: isinstance(x, tuple) and eqx.is_array_like(x[0]),
         )
 
-    means = jt.map(
-        lambda x, axis: np.nanmean(x, axis=axis),
-        vars_,
-        mean_axes,
+    agg_fn = _agg_standard if agg_mode == "standard" else _agg_circular
+    # Aggregate per node (return mean, upper, lower)
+    means, ubs, lbs = jtree.unzip(
+        jt.map(
+            lambda x, axis: agg_fn(x, axis, n_std_plot),
+            vars_,
+            mean_axes,
+        )
     )
 
-    stds = jt.map(
-        lambda x, axis: np.nanstd(x, axis=axis),
-        vars_,
-        mean_axes,
+    means, ubs, lbs = jtree.unzip(
+        jt.map(lambda m, ub, lb: _maybe_unwrap(m, ub, lb, agg_mode), means, ubs, lbs)
     )
 
     if keep_axis is None:
-        means, stds = jt.map(lambda arr: arr[None, ...], (means, stds))
+        means, ubs, lbs = jt.map(lambda arr: arr[None, ...], (means, ubs, lbs))
         vars_flat = jt.map(lambda x: np.reshape(x, (1, -1, x.shape[-1])), vars_)
     else:
         vars_flat = jt.map(
@@ -199,6 +279,10 @@ def profiles(
 
     if hline is not None:
         fig.add_hline(**hline)
+
+    if agg_mode == "circular":
+        fig.add_hline(y=np.pi, line_dash="dot", line_color="grey")
+        fig.add_hline(y=-np.pi, line_dash="dot", line_color="grey")
 
     def add_profile(fig, label, var_flat, means, ubs, lbs, ts, color) -> go.Figure:
         traces = []
@@ -266,22 +350,21 @@ def profiles(
                 raise ValueError(f"Invalid mode: {mode}")
 
         fig.add_traces(traces)
-
         return fig
 
     plot_data = jt.leaves(
-        tree_zip(vars_flat, means, stds, timesteps, labels),
+        tree_zip(vars_flat, means, ubs, lbs, timesteps, labels),
         is_leaf=lambda x: isinstance(x, tuple),
     )
 
-    for i, (var_flat, means, stds, ts, label) in enumerate(plot_data):
+    for i, (var_flat, means_i, ubs_i, lbs_i, ts, label) in enumerate(plot_data):
         fig = add_profile(
             fig,
             label,
             var_flat,
-            means,
-            means + n_std_plot * stds,
-            means - n_std_plot * stds,
+            means_i,
+            ubs_i,
+            lbs_i,
             ts,
             colors_rgb[i],
         )
@@ -298,7 +381,6 @@ def profiles(
     )
 
     fig.update_layout(legend_itemsizing="constant")
-
     fig.update_layout(legend_title_text=("Condition" if legend_title is None else legend_title))
 
     if layout_kws is not None:
@@ -1182,7 +1264,7 @@ TRAJ_SCATTER_KWS_DEFAULT: StrMapping = MappingProxyType(
 
 
 def trajectories[T](
-    subplots_data: SeqOfT[Array | np.ndarray, T],
+    subplots_data: SeqOfT[Float[Array, "... time dims"] | np.ndarray, T],
     colorscale_axis: int = 0,  # which batch axis forms color groups
     scatter_kws: (StrMapping | SeqOfT[StrMapping, T]) = TRAJ_SCATTER_KWS_DEFAULT,
     subplot_titles: Optional[SeqOfT[str, T]] = None,
@@ -1258,6 +1340,8 @@ def trajectories[T](
         "subplots_data",
         subplot_titles,
         arg_label="subplot_titles",
+        #! The `leaves(tree_labels(...))` here will always just be range(len(vars_))
+        #! so long as we're only dealing in sequence-likes
         default_fn=lambda vars_: [f"<b>{label}</b>" for label in jt.leaves(tree_labels(vars_))],
         leaf_type=str,
     )
@@ -1369,8 +1453,17 @@ def trajectories[T](
             is_leaf=lambda x: isinstance(x, tuple),
         )
 
-        ts = np.arange(var.shape[-2])
         is_2d = d == 2
+        ts = np.arange(var.shape[-2])
+
+        def _customdata_ts(label):
+            return np.concatenate(
+                [
+                    ts[:, None],
+                    np.broadcast_to([[label]], (ts.shape[0], 1)),
+                ],
+                axis=-1,
+            )
 
         def _add_curve_trace(curve, color_str, label, showlegend_flag):
             common = dict(
@@ -1385,13 +1478,7 @@ def trajectories[T](
                     **common,
                     x=curve[..., 0],
                     y=curve[..., 1],
-                    customdata=np.concatenate(
-                        [
-                            ts[:, None],
-                            np.broadcast_to([[label]], (ts.shape[0], 1)),
-                        ],
-                        axis=-1,
-                    ),
+                    customdata=_customdata_ts(label),
                 )
             else:
                 trace = go.Scatter3d(
@@ -1474,12 +1561,15 @@ def trajectories[T](
                         )
                         | mean_scatter_kws
                     )
-
                     xy = mean_arr[j, k]
                     if is_2d:
-                        trace = go.Scatter(x=xy[..., 0], y=xy[..., 1], **kwargs)
+                        trace = go.Scatter(
+                            x=xy[..., 0], y=xy[..., 1], customdata=_customdata_ts(label), **kwargs
+                        )
                     else:
-                        trace = go.Scatter3d(x=xy[:, 0], y=xy[:, 1], z=xy[:, 2], **kwargs)
+                        trace = go.Scatter3d(
+                            x=xy[:, 0], y=xy[:, 1], z=xy[:, 2], customdata=ts[:, None], **kwargs
+                        )
 
                     fig.add_trace(trace, row=1, col=col)
 

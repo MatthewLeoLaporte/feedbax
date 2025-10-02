@@ -14,10 +14,10 @@ TODO:
 #! Can't do this because `AbstractVar` annotations can't be stringified.
 # from __future__ import annotations
 
+import logging
 from abc import abstractmethod, abstractproperty
 from collections.abc import Callable, Mapping, MutableSequence, Sequence
 from functools import cached_property, partial
-import logging
 from typing import (
     TYPE_CHECKING,
     Generic,
@@ -30,18 +30,21 @@ from typing import (
 )
 
 import equinox as eqx
-from equinox import AbstractVar, Module, field
-from feedbax.intervene.intervene import AbstractIntervenorInput
-from feedbax.intervene.schedule import IntervenorLabelStr
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import jax.tree_util as jtu
 import jax.tree as jt
-from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree, Shaped
+import jax.tree_util as jtu
 import numpy as np
 import plotly.graph_objs as go  # pyright: ignore [reportMissingTypeStubs]
+from equinox import AbstractVar, Module, field
+from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree, Shaped
 
+import feedbax.plotly as plot
+from feedbax._mapping import WhereDict
+from feedbax._model import ModelInput
+from feedbax._staged import AbstractStagedModel
+from feedbax._tree import is_type, tree_call, tree_call_with_keys
 from feedbax.intervene import (
     AbstractIntervenor,
     AbstractIntervenorInput,
@@ -49,7 +52,9 @@ from feedbax.intervene import (
     TimeSeriesParam,
     schedule_intervenor,
 )
+from feedbax.intervene.intervene import AbstractIntervenorInput
 from feedbax.intervene.remove import remove_all_intervenors
+from feedbax.intervene.schedule import IntervenorLabelStr
 from feedbax.loss import (
     AbstractLoss,
     LossDict,
@@ -58,13 +63,8 @@ from feedbax.loss import (
     target_final_state,
     target_zero,
 )
-from feedbax._mapping import WhereDict
-from feedbax._model import ModelInput
 from feedbax.misc import BatchInfo, is_module, is_none
-import feedbax.plotly as plot
-from feedbax._staged import AbstractStagedModel
 from feedbax.state import CartesianState, StateT
-from feedbax._tree import is_type, tree_call, tree_call_with_keys
 
 if TYPE_CHECKING:
     from feedbax._model import AbstractModel
@@ -100,9 +100,7 @@ class TaskTrialSpec(Module):
     targets: WhereDict[TargetSpec | Mapping[str, TargetSpec]]
     inputs: PyTree
     # target: AbstractVar[PyTree[Array]]
-    intervene: Mapping[IntervenorLabelStr, AbstractIntervenorInput] = field(
-        default_factory=dict
-    )
+    intervene: Mapping[IntervenorLabelStr, AbstractIntervenorInput] = field(default_factory=dict)
     extra: Optional[Mapping[str, Array]] = None
 
     @property
@@ -120,38 +118,7 @@ class TaskTrialSpec(Module):
         )
 
 
-class SimpleReachTaskInputs(Module):
-    """Model input for a simple reaching task.
-
-    Attributes:
-        effector_target: The trajectory of effector target states to be presented to
-            the model.
-    """
-
-    effector_target: CartesianState
-
-
-class DelayedReachTaskInputs(Module):
-    """Model input for a delayed reaching task.
-
-    Attributes:
-        effector_target: The trajectory of effector target states to be presented to
-            the model.
-        hold: The hold/go (1/0 signal) to be presented to the model.
-        target_on: A signal indicating to the model when the value of `effector_target`
-            should be interpreted as a reach target. Otherwise, if zeros are passed for
-            the target during (say) the hold period, the model may interpret this as
-            meaningful—that is, "your reach target is at 0".
-    """
-
-    effector_target: CartesianState  # PyTree[Float[Array, "time ..."]]
-    hold: Int[
-        Array, "time 1"
-    ]  # TODO: do these need to be typed as column vectors, here?
-    target_on: Int[Array, "time 1"]
-
-
-T = TypeVar('T')
+T = TypeVar("T")
 # Strings are instances of `Sequence[str]`; we can use the following type to
 # distinguish sequences of strings (`NonCharSequence[str]`) from single strings
 # (i.e. which might be considered `CharSequence`)
@@ -181,6 +148,7 @@ class TrialSpecDependency(Module):
     define that certain intervenor params should be provided as model inputs, even though those
     intervenor params have not yet been generated and placed in the trial specification.
     """
+
     func: Callable[[TaskTrialSpec, PRNGKeyArray], PyTree[Array]]
 
     def __call__(self, trial_spec: TaskTrialSpec, key: PRNGKeyArray):
@@ -214,12 +182,11 @@ class AbstractTask(Module):
     n_steps: AbstractVar[int]
     seed_validation: AbstractVar[int]
     intervention_specs: AbstractVar[TaskInterventionSpecs]
+    input_dependencies: AbstractVar[dict[str, TrialSpecDependency]]
 
     def __check_init__(self):
         if not isinstance(self.loss_func, AbstractLoss):
-            raise ValueError(
-                "The loss function must be an instance of `AbstractLoss`"
-            )
+            raise ValueError("The loss function must be an instance of `AbstractLoss`")
 
         # TODO: check that `loss_func` doesn't contain `TargetStateLoss` terms which lack
         # a default target spec, or have a spec with a missing `spec.value', and
@@ -267,9 +234,25 @@ class AbstractTask(Module):
             is_leaf=is_none,
         )
 
+        trial_spec = self._attach_input_dependencies(trial_spec)
         trial_spec = self._evaluate_self_dependencies(trial_spec, key_dependencies)
 
         return trial_spec
+
+    def _attach_input_dependencies(self, trial_spec: TaskTrialSpec) -> TaskTrialSpec:
+        # Attach `self.input_dependencies` under `trial_spec.inputs`
+        deps = self.input_dependencies
+        if not deps:
+            return trial_spec
+        inputs = trial_spec.inputs
+        if isinstance(inputs, Mapping):
+            missing = {k: v for k, v in deps.items() if k not in inputs}
+            if not missing:
+                return trial_spec
+            merged_inputs = dict(inputs) | missing
+        else:
+            merged_inputs = dict(task=inputs, **deps)
+        return eqx.tree_at(lambda x: x.inputs, trial_spec, merged_inputs)
 
     def _evaluate_self_dependencies(
         self,
@@ -311,9 +294,7 @@ class AbstractTask(Module):
         )
 
         # Unwrap the `TimeSeriesParam` instances.
-        timeseries_arrays = tree_call(
-            timeseries, is_leaf=is_type(TimeSeriesParam)
-        )
+        timeseries_arrays = tree_call(timeseries, is_leaf=is_type(TimeSeriesParam))
 
         # Broadcast the non-timeseries arrays.
         other_broadcasted = jt.map(
@@ -367,6 +348,7 @@ class AbstractTask(Module):
             is_leaf=is_none,
         )
 
+        trial_specs = self._attach_input_dependencies(trial_specs)
         trial_specs = self._evaluate_self_dependencies(trial_specs, key_dependencies)
 
         return trial_specs
@@ -379,13 +361,32 @@ class AbstractTask(Module):
 
     @eqx.filter_jit
     @jax.named_scope("fbx.AbstractTask.eval_trials")
-    def eval_trials(
+    def eval_trials_with_loss(
         self,
         model: "AbstractModel[StateT]",
         trial_specs: TaskTrialSpec,
         keys: PRNGKeyArray,
     ) -> Tuple[StateT, LossDict]:
-        """Evaluate a model on a set of trials.
+        """Evaluate a model on a set of trials, returning states and losses.
+
+        Arguments:
+            model: The model to evaluate.
+            trial_specs: The set of trials to evaluate the model on.
+            keys: For providing randomness during model evaluation.
+        """
+        states = self.eval_trials(model, trial_specs, keys)
+        losses = self.loss_func(states, trial_specs, model)
+        return states, losses
+
+    @eqx.filter_jit
+    @jax.named_scope("fbx.AbstractTask.eval_trials")
+    def eval_trials(
+        self,
+        model: "AbstractModel[StateT]",
+        trial_specs: TaskTrialSpec,
+        keys: PRNGKeyArray,
+    ) -> StateT:
+        """Evaluate a model on a set of trials, returning states.
 
         Arguments:
             model: The model to evaluate.
@@ -403,15 +404,11 @@ class AbstractTask(Module):
 
         init_states = jax.vmap(model.step.state_consistency_update)(init_states)
 
-        states = eqx.filter_vmap(model)(  # ), in_axes=(eqx.if_array(0), 0, 0))(
+        return eqx.filter_vmap(model)(  # ), in_axes=(eqx.if_array(0), 0, 0))(
             ModelInput(trial_specs.inputs, trial_specs.intervene),
             init_states,
             keys,
         )
-
-        losses = self.loss_func(states, trial_specs, model)
-
-        return states, losses
 
     def eval_with_loss(
         self,
@@ -432,7 +429,7 @@ class AbstractTask(Module):
         keys = jr.split(key, self.n_validation_trials)
         trial_specs = self.validation_trials
 
-        return self.eval_trials(model, trial_specs, keys)
+        return self.eval_trials_with_loss(model, trial_specs, keys)
 
     def eval(
         self,
@@ -445,10 +442,42 @@ class AbstractTask(Module):
             model: The model to evaluate.
             key: For providing randomness during model evaluation.
         """
-        states, _ = self.eval_with_loss(model, key)
-        return states
+        keys = jr.split(key, self.n_validation_trials)
+        trial_specs = self.validation_trials
+
+        return self.eval_trials(model, trial_specs, keys)
 
     @eqx.filter_jit
+    def _eval_ensemble(
+        self,
+        eval_fn: Callable,
+        models: "AbstractModel[StateT]",
+        n_replicates: int,
+        key: PRNGKeyArray,
+        ensemble_random_trials: bool = True,
+    ) -> tuple[StateT, LossDict]:
+        models_arrays, models_other = eqx.partition(
+            models,
+            eqx.is_array,
+            is_leaf=lambda x: isinstance(x, AbstractIntervenor),
+        )
+
+        def evaluate_single(model_arrays, model_other, key):
+            model = eqx.combine(model_arrays, model_other)
+            return eval_fn(model, key)
+
+        # TODO: Instead, we should expect the user to provide `keys` instead of `key`,
+        # if they are vmapping `eval`.
+        if ensemble_random_trials:
+            key = jr.split(key, n_replicates)
+            key_in_axis = 0
+        else:
+            key_in_axis = None
+
+        return eqx.filter_vmap(evaluate_single, in_axes=(0, None, key_in_axis))(
+            models_arrays, models_other, key
+        )
+
     def eval_ensemble_with_loss(
         self,
         models: "AbstractModel[StateT]",
@@ -467,26 +496,12 @@ class AbstractTask(Module):
             ensemble_random_trials: If `False`, each model in the ensemble will be
                 evaluated on the same set of trials.
         """
-        models_arrays, models_other = eqx.partition(
+        return self._eval_ensemble(
+            self.eval_with_loss,
             models,
-            eqx.is_array,
-            is_leaf=lambda x: isinstance(x, AbstractIntervenor),
-        )
-
-        def evaluate_single(model_arrays, model_other, key):
-            model = eqx.combine(model_arrays, model_other)
-            return self.eval_with_loss(model, key)
-
-        # TODO: Instead, we should expect the user to provide `keys` instead of `key`,
-        # if they are vmapping `eval`.
-        if ensemble_random_trials:
-            key = jr.split(key, n_replicates)
-            key_in_axis = 0
-        else:
-            key_in_axis = None
-
-        return eqx.filter_vmap(evaluate_single, in_axes=(0, None, key_in_axis))(
-            models_arrays, models_other, key
+            n_replicates,
+            key,
+            ensemble_random_trials=ensemble_random_trials,
         )
 
     def eval_ensemble(
@@ -507,10 +522,13 @@ class AbstractTask(Module):
             ensemble_random_trials: If `False`, each model in the ensemble will be
                 evaluated on the same set of trials.
         """
-        states, _ = self.eval_ensemble_with_loss(
-            models, n_replicates, key, ensemble_random_trials=ensemble_random_trials
+        return self._eval_ensemble(
+            self.eval,
+            models,
+            n_replicates,
+            key,
+            ensemble_random_trials=ensemble_random_trials,
         )
-        return states
 
     @eqx.filter_jit
     def eval_train_batch(
@@ -542,7 +560,7 @@ class AbstractTask(Module):
             )
         )(keys_batch)
 
-        states, losses = self.eval_trials(model, trial_specs, keys_eval)
+        states, losses = self.eval_trials_with_loss(model, trial_specs, keys_eval)
 
         return states, losses, trial_specs
 
@@ -633,9 +651,7 @@ class AbstractTask(Module):
         for label, spec in self.intervention_specs.training.items():
             #! This won't work if an intervenor spec is only present in the validation dict
             if label in self.intervention_specs.validation:
-                intervenor_params_val = (
-                    self.intervention_specs.validation[label].intervenor.params
-                )
+                intervenor_params_val = self.intervention_specs.validation[label].intervenor.params
             else:
                 intervenor_params_val = None
             task, model_ = schedule_intervenor(
@@ -652,7 +668,12 @@ class AbstractTask(Module):
 
         return model_
 
-    def add_input(self, name: str, input_fn: Callable[[TaskTrialSpec, PRNGKeyArray], PyTree], exist_ok: bool = True) -> Self:
+    def add_input(
+        self,
+        name: str,
+        input_fn: Callable[[TaskTrialSpec, PRNGKeyArray], PyTree],
+        exist_ok: bool = True,
+    ) -> Self:
         """Add a task input; i.e. additional data that the task will provide to the model.
 
         Arguments:
@@ -674,7 +695,9 @@ class AbstractTask(Module):
 
     @abstractmethod
     def validation_plots(
-        self, states, trial_specs: Optional[TaskTrialSpec] = None,
+        self,
+        states,
+        trial_specs: Optional[TaskTrialSpec] = None,
     ) -> Mapping[str, go.Figure]:
         """Returns a basic set of plots to visualize performance on the task."""
         ...
@@ -729,6 +752,7 @@ class AbstractTask(Module):
 
     #     return task
 
+
 def _pos_only_states(positions: Float[Array, "... ndim=2"]):
     """Construct Cartesian init and target states with zero force and velocity."""
     velocities = jnp.zeros_like(positions)
@@ -778,9 +802,7 @@ def _centerout_endpoints_grid(
         centreout_endpoints,
         in_axes=(0, None, None),
         out_axes=1,
-    )(
-        centers, eval_n_directions, eval_reach_length
-    ).reshape((2, -1, N_DIM))
+    )(centers, eval_n_directions, eval_reach_length).reshape((2, -1, N_DIM))
     return pos_endpoints
 
 
@@ -793,6 +815,17 @@ def _forceless_task_inputs(
         vel=target_states.vel,
         force=None,
     )
+
+
+class SimpleReachTaskInputs(Module):
+    """Model input for a simple reaching task.
+
+    Attributes:
+        effector_target: The trajectory of effector target states to be presented to
+            the model.
+    """
+
+    effector_target: CartesianState
 
 
 class SimpleReaches(AbstractTask):
@@ -835,7 +868,9 @@ class SimpleReaches(AbstractTask):
     eval_reach_length: float = 0.5
     eval_grid_n: int = 1  # e.g. 2 -> 2x2 grid of center-out reach sets
 
-    def get_train_trial(self, key: PRNGKeyArray, batch_info: Optional[BatchInfo] = None) -> TaskTrialSpec:
+    def get_train_trial(
+        self, key: PRNGKeyArray, batch_info: Optional[BatchInfo] = None
+    ) -> TaskTrialSpec:
         """Random reach endpoints across the rectangular workspace.
 
         Arguments:
@@ -843,10 +878,7 @@ class SimpleReaches(AbstractTask):
         """
 
         effector_pos_endpoints = uniform_tuples(key, n=2, bounds=self.workspace)
-
-        effector_init_state, effector_target_state = _pos_only_states(
-            effector_pos_endpoints
-        )
+        effector_init_state, effector_target_state = _pos_only_states(effector_pos_endpoints)
 
         # Broadcast the fixed targets to a sequence with the desired number of
         # time steps, since that's what `ForgetfulIterator` and `Loss` will expect.
@@ -875,9 +907,7 @@ class SimpleReaches(AbstractTask):
             self.eval_reach_length,
         )
 
-        effector_init_states, effector_target_states = _pos_only_states(
-            effector_pos_endpoints
-        )
+        effector_init_states, effector_target_states = _pos_only_states(effector_pos_endpoints)
 
         # Broadcast to the desired number of time steps. Awkwardly, we also
         # need to use `swapaxes` because the batch dimension is explicit, here.
@@ -890,30 +920,30 @@ class SimpleReaches(AbstractTask):
 
     def _construct_trial_spec(self, effector_init_state, effector_target_state):
         return TaskTrialSpec(
-            inits=WhereDict({
-                (lambda state: state.mechanics.effector): effector_init_state
-            }),
+            inits=WhereDict({(lambda state: state.mechanics.effector): effector_init_state}),
             inputs=dict(
                 effector_target=_forceless_task_inputs(effector_target_state),
-            ) | self.input_dependencies,
-            targets=WhereDict({
-                (lambda state: state.mechanics.effector.pos): (
-                    TargetSpec(effector_target_state.pos, discount=self._pos_discount)
-                ),
-                # (lambda state: state.mechanics.effector.vel): {
-                #     "Effector final velocity": (
-                #         # The `target_final_state` here is redundant with `xabdeef.losses`
-                #         # -- but explicit.
-                #         TargetSpec(effector_target_state.vel[-1]) & target_final_state
-                #     ),
-                # },
-            }),
+            ),
+            targets=WhereDict(
+                {
+                    (lambda state: state.mechanics.effector.pos): (
+                        TargetSpec(effector_target_state.pos, discount=self._pos_discount)
+                    ),
+                    # (lambda state: state.mechanics.effector.vel): {
+                    #     "Effector final velocity": (
+                    #         # The `target_final_state` here is redundant with `xabdeef.losses`
+                    #         # -- but explicit.
+                    #         TargetSpec(effector_target_state.vel[-1]) & target_final_state
+                    #     ),
+                    # },
+                }
+            ),
         )
 
     @property
     def n_validation_trials(self) -> int:
         """Number of trials in the validation set."""
-        return self.eval_n_directions * self.eval_grid_n ** 2
+        return self.eval_n_directions * self.eval_grid_n**2
 
     def validation_plots(
         self, states, trial_specs: Optional[TaskTrialSpec] = None
@@ -925,6 +955,25 @@ class SimpleReaches(AbstractTask):
                 # workspace=self.workspace,
             )
         )
+
+
+class DelayedReachTaskInputs(Module):
+    """Model input for a delayed reaching task.
+
+    Attributes:
+        effector_target: The trajectory of effector target states to be presented to
+            the model.
+        hold: The hold/go (1/0 signal) to be presented to the model.
+        target_on: A signal indicating to the model when the value of `effector_target`
+            should be interpreted as a reach target. Otherwise, if zeros are passed for
+            the target during (say) the hold period, the model may interpret this as
+            meaningful—that is, "your reach target is at 0".
+    """
+
+    effector_target: CartesianState  # PyTree[Float[Array, "time ..."]]
+    hold: Int[Array, "time 1"]  # TODO: do these need to be typed as column vectors, here?
+    target_on: Int[Array, "time 1"]
+
 
 class DelayedReaches(AbstractTask):
     """Uniform random endpoints in a rectangular workspace.
@@ -949,25 +998,29 @@ class DelayedReaches(AbstractTask):
         seed_validation: The random seed for generating the validation trials.
     """
 
+    n_steps: int
     loss_func: AbstractLoss
     workspace: Float[Array, "bounds=2 ndim=2"] = field(converter=jnp.asarray)
-    n_steps: int
-    epoch_len_ranges: Tuple[Tuple[int, int], ...] = field(
+    seed_validation: int = 5555
+    intervention_specs: TaskInterventionSpecs = TaskInterventionSpecs()
+    input_dependencies: dict[str, TrialSpecDependency] = field(default_factory=dict)
+    epoch_len_ranges: Sequence[Tuple[int, int], ...] = field(
         default=(
-            (5, 15),  # start
+            (5, 15),  # pre-target on
             (10, 20),  # target on ("stim")
-            (10, 25),  # delay
         )
     )
-    target_on_epochs: Int[Array, "_"] = field(default=(1,), converter=jnp.asarray)
-    hold_epochs: Int[Array, "_"] = field(default=(0, 1, 2), converter=jnp.asarray)
+    hold_epochs: Int[Array, " _"] = field(default=(0, 1), converter=jnp.asarray)
+    target_on_epochs: Int[Array, " _"] = field(default=(1, 2), converter=jnp.asarray)
+    move_epochs: Int[Array, " _"] = field(default=(2,), converter=jnp.asarray)
+    p_catch_trial: float = 0.5  #! TODO
     eval_n_directions: int = 7
     eval_reach_length: float = 0.5
     eval_grid_n: int = 1
-    seed_validation: int = 5555
-    intervention_specs: TaskInterventionSpecs = TaskInterventionSpecs()
 
-    def get_train_trial(self, key: PRNGKeyArray, batch_info: Optional[BatchInfo] = None) -> TaskTrialSpec:
+    def get_train_trial(
+        self, key: PRNGKeyArray, batch_info: Optional[BatchInfo] = None
+    ) -> TaskTrialSpec:
         """Random reach endpoints across the rectangular workspace.
 
         Arguments:
@@ -975,12 +1028,11 @@ class DelayedReaches(AbstractTask):
         """
 
         key1, key2 = jr.split(key)
+
         effector_pos_endpoints = uniform_tuples(key1, n=2, bounds=self.workspace)
+        effector_init_state, effector_target_state = _pos_only_states(effector_pos_endpoints)
 
-        effector_init_state, effector_target_state = _pos_only_states(
-            effector_pos_endpoints
-        )
-
+        # Construct time sequences of inputs and targets
         task_inputs, effector_target_states, epoch_start_idxs = self._get_sequences(
             effector_init_state, effector_target_state, key2
         )
@@ -990,7 +1042,13 @@ class DelayedReaches(AbstractTask):
                 {(lambda state: state.mechanics.effector): effector_init_state},
             ),
             inputs=task_inputs,
-            targets=effector_target_states,
+            targets=WhereDict(
+                {
+                    (lambda state: state.mechanics.effector.pos): (
+                        TargetSpec(effector_target_state.pos)  # , discount=self._pos_discount)
+                    ),
+                }
+            ),
             extra=dict(epoch_start_idxs=epoch_start_idxs),
         )
 
@@ -1004,22 +1062,26 @@ class DelayedReaches(AbstractTask):
             self.eval_reach_length,
         )
 
-        effector_init_states, effector_target_states = _pos_only_states(
-            effector_pos_endpoints
-        )
+        effector_init_states, effector_target_states = _pos_only_states(effector_pos_endpoints)
 
         key_val = jr.PRNGKey(self.seed_validation)
         epochs_keys = jr.split(key_val, effector_init_states.pos.shape[0])
-        task_inputs, effector_target_states, epoch_start_idxs = jax.vmap(
-            self._get_sequences
-        )(effector_init_states, effector_target_states, epochs_keys)
+        task_inputs, effector_target_states, epoch_start_idxs = jax.vmap(self._get_sequences)(
+            effector_init_states, effector_target_states, epochs_keys
+        )
 
         return TaskTrialSpec(
             inits=WhereDict(
                 {(lambda state: state.mechanics.effector): effector_init_states},
             ),
             inputs=task_inputs,
-            targets=effector_target_states,
+            targets=WhereDict(
+                {
+                    (lambda state: state.mechanics.effector.pos): (
+                        TargetSpec(effector_target_states.pos)  # , discount=self._pos_discount)
+                    ),
+                }
+            ),
             extra=dict(epoch_start_idxs=epoch_start_idxs),
         )
 
@@ -1028,39 +1090,50 @@ class DelayedReaches(AbstractTask):
         init_states: CartesianState,
         target_states: CartesianState,
         key: PRNGKeyArray,
-    ) -> Tuple[DelayedReachTaskInputs, CartesianState, Int[Array, "n_epochs"]]:
+    ) -> Tuple[DelayedReachTaskInputs, CartesianState, Int[Array, " n_epochs"]]:
         """Convert static task inputs to sequences, and make hold signal."""
-        epoch_lengths = gen_epoch_lengths(key, self.epoch_len_ranges)
-        epoch_start_idxs = jnp.pad(
-            jnp.cumsum(epoch_lengths), (1, 0), constant_values=(0, -1)
-        )
-        epoch_masks = get_masks(self.n_steps - 1, epoch_start_idxs)
-        move_epoch_mask = jnp.logical_not(jnp.prod(epoch_masks, axis=0))[None, :]
+        epoch_lengths_pre = gen_epoch_lengths(key, self.epoch_len_ranges)
+        remaining_len = (self.n_steps - 1) - jnp.sum(epoch_lengths_pre)
+        remaining_len = jnp.maximum(remaining_len, 0)
+        epoch_lengths = jnp.concatenate((epoch_lengths_pre, jnp.array([remaining_len])))
+        epoch_bounds = jnp.pad(jnp.cumsum(epoch_lengths), (1, 0), constant_values=(0, -1))
+        epoch_masks = get_masks(self.n_steps - 1, epoch_bounds)
+        # move_epoch_mask = jnp.logical_not(jnp.prod(epoch_masks, axis=0))[None, :]
 
         stim_seqs = get_masked_seqs(
-            _forceless_task_inputs(target_states), epoch_masks[self.target_on_epochs]
+            _forceless_task_inputs(target_states),
+            epoch_masks[self.target_on_epochs],
         )
         target_seqs = jt.map(
             lambda x, y: x + y,
-            get_masked_seqs(target_states, move_epoch_mask),
+            get_masked_seqs(target_states, epoch_masks[self.move_epochs]),
             get_masked_seqs(init_states, epoch_masks[self.hold_epochs]),
         )
         stim_on_seq = get_scalar_epoch_seq(
-            epoch_start_idxs, self.n_steps - 1, 1.0, self.target_on_epochs
+            epoch_bounds, self.n_steps - 1, 1.0, self.target_on_epochs
         )
-        hold_seq = get_scalar_epoch_seq(
-            epoch_start_idxs, self.n_steps - 1, 1.0, self.hold_epochs
-        )
+        hold_seq = get_scalar_epoch_seq(epoch_bounds, self.n_steps - 1, 1.0, self.hold_epochs)
 
         task_input = DelayedReachTaskInputs(stim_seqs, hold_seq, stim_on_seq)
         target_states = target_seqs
 
-        return task_input, target_states, epoch_start_idxs
+        return task_input, target_states, epoch_bounds
 
     @property
     def n_validation_trials(self) -> int:
         """Number of trials in the validation set."""
         return self.eval_grid_n**2 * self.eval_n_directions
+
+    def validation_plots(
+        self, states, trial_specs: Optional[TaskTrialSpec] = None
+    ) -> dict[str, go.Figure]:
+        return dict(
+            effector_trajectories=plot.effector_trajectories(
+                states,
+                trial_specs=trial_specs,
+                # workspace=self.workspace,
+            )
+        )
 
 
 class Stabilization(AbstractTask):
@@ -1079,12 +1152,14 @@ class Stabilization(AbstractTask):
     # )
     intervention_specs: TaskInterventionSpecs = TaskInterventionSpecs()
 
-    def get_train_trial(self, key: PRNGKeyArray, batch_info: Optional[BatchInfo] = None) -> TaskTrialSpec:
+    def get_train_trial(
+        self, key: PRNGKeyArray, batch_info: Optional[BatchInfo] = None
+    ) -> TaskTrialSpec:
         """Random reach endpoints in a 2D rectangular workspace."""
 
         points = uniform_tuples(key, n=1, bounds=self.workspace)
 
-        target_state, = _pos_only_states(points)
+        (target_state,) = _pos_only_states(points)
 
         init_state = target_state
 
@@ -1094,18 +1169,24 @@ class Stabilization(AbstractTask):
         )
 
         return TaskTrialSpec(
-            inits=WhereDict({
-                (lambda state: state.mechanics.effector): init_state,
-            }),
+            inits=WhereDict(
+                {
+                    (lambda state: state.mechanics.effector): init_state,
+                }
+            ),
             inputs=SimpleReachTaskInputs(
                 effector_target=_forceless_task_inputs(effector_target_state)
             ),
-            targets=WhereDict({
-                (lambda state: state.mechanics.effector.pos): TargetSpec(effector_target_state.pos),
-            }),
+            targets=WhereDict(
+                {
+                    (lambda state: state.mechanics.effector.pos): TargetSpec(
+                        effector_target_state.pos
+                    ),
+                }
+            ),
         )
 
-    def validation_plots(self, states, trial_specs = None) -> Mapping[str, go.Figure]:
+    def validation_plots(self, states, trial_specs=None) -> Mapping[str, go.Figure]:
         return dict()
 
     def get_validation_trials(self, key: PRNGKeyArray) -> TaskTrialSpec:
@@ -1121,37 +1202,39 @@ class Stabilization(AbstractTask):
             self.eval_grid_n,
         )
 
-        target_states, = _pos_only_states(points)
+        (target_states,) = _pos_only_states(points)
 
         init_states = target_states
 
         # Broadcast to the desired number of time steps. Awkwardly, we also
         # need to use `swapaxes` because the batch dimension is explicit, here.
         effector_target_states = jt.map(
-            lambda x: jnp.swapaxes(
-                jnp.broadcast_to(x, (self.n_steps - 1, *x.shape)), 0, 1
-            ),
+            lambda x: jnp.swapaxes(jnp.broadcast_to(x, (self.n_steps - 1, *x.shape)), 0, 1),
             target_states,
         )
 
         return TaskTrialSpec(
-            inits=WhereDict({
-                (lambda state: state.mechanics.effector): init_states,
-            }),
+            inits=WhereDict(
+                {
+                    (lambda state: state.mechanics.effector): init_states,
+                }
+            ),
             inputs=SimpleReachTaskInputs(
                 effector_target=_forceless_task_inputs(effector_target_states)
             ),
-            targets=WhereDict({
-                (lambda state: state.mechanics.effector.pos): (
-                    TargetSpec(effector_target_states.pos)
-                ),
-            }),
+            targets=WhereDict(
+                {
+                    (lambda state: state.mechanics.effector.pos): (
+                        TargetSpec(effector_target_states.pos)
+                    ),
+                }
+            ),
         )
 
     @property
     def n_validation_trials(self) -> int:
         """Size of the validation set."""
-        return self.eval_grid_n ** 2
+        return self.eval_grid_n**2
 
 
 def _points_grid(
@@ -1204,7 +1287,7 @@ def gen_epoch_lengths(
         (2, 5),  # second epoch
         (1, 3),
     ),
-) -> Int[Array, "n_epochs"]:
+) -> Int[Array, " n_epochs"]:
     """Generate a random integer in each given ranges."""
     ranges_arr = jnp.array(ranges, dtype=int)
     return jr.randint(key, (ranges_arr.shape[0],), *ranges_arr.T)
@@ -1212,13 +1295,16 @@ def gen_epoch_lengths(
 
 def get_masks(
     length: int,
-    idx_bounds: Int[Array, "_"],
+    idx_bounds: Int[Array, " _"],
 ):
-    """Get a 1D mask of length `length` with `False` values at `idxs`."""
+    """Get 1D masks of length `length` with `False` values at `idxs`."""
     idxs = jnp.arange(length)
+
     # ? could also use `arange` to get ranges of idxs
-    mask_fn = lambda e: (idxs < idx_bounds[e]) + (idxs > idx_bounds[e + 1] - 1)
-    return jnp.stack([mask_fn(e) for e in range(len(idx_bounds) - 1)])
+    def _mask_fn(e):
+        return (idxs < idx_bounds[e]) + (idxs > idx_bounds[e + 1] - 1)
+
+    return jnp.stack([_mask_fn(e) for e in range(len(idx_bounds) - 1)])
 
 
 def get_masked_seqs(
@@ -1245,9 +1331,7 @@ def get_masked_seqs(
     # seqs = tree_set(seqs, targets, slice(*epoch_idxs[target_epoch:target_epoch + 2]))
     mask = jnp.prod(masks, axis=0)
     seqs = jt.map(
-        lambda x, y: jnp.where(
-            jnp.expand_dims(mask, np.arange(y.ndim) + 1), x, y[None, :]
-        ),
+        lambda x, y: jnp.where(jnp.expand_dims(mask, np.arange(y.ndim) + 1), x, y[None, :]),
         seqs,
         arrays,
     )
@@ -1255,19 +1339,32 @@ def get_masked_seqs(
 
 
 def get_scalar_epoch_seq(
-    epoch_idxs: Int[Array, "n_epochs-1"],
+    epoch_idxs: Int[Array, " n_epochs"],
     n_steps: int,
     hold_value: float,
-    hold_epochs: Sequence[int] | Int[Array, "_"],
+    hold_epochs: Sequence[int] | Int[Array, " _"],
 ):
-    """A scalar sequence with a non-zero value held during `hold_epochs`.
+    """A scalar sequence with `hold_value` during `hold_epochs`, 0 elsewhere.
 
-    Similar to `get_target_steps`, but not for a PyTree.
+    `epoch_idxs` is a monotonic array of epoch boundaries of length n_epochs+1,
+    where epoch e spans [epoch_idxs[e], epoch_idxs[e+1]) in step indices.
     """
-    seq = jnp.zeros((n_steps,))
     idxs = jnp.arange(n_steps)
-    # fill_idxs = jnp.arange(epoch_idxs[hold_epoch], epoch_idxs[hold_epoch + 1])
-    mask_fn = lambda e: (idxs < epoch_idxs[e]) + (idxs > epoch_idxs[e + 1] - 1)
-    mask = jnp.prod(jnp.stack([mask_fn(e) for e in hold_epochs]), axis=0)
-    seq = jnp.where(mask, seq, jnp.array(hold_value))
-    return jnp.expand_dims(seq, -1)
+
+    def _mask_fn(e: int):
+        start = epoch_idxs[e]
+        end = epoch_idxs[e + 1]  # exclusive
+        return (idxs >= start) & (idxs < end)  # boolean mask for epoch e
+
+    # Normalize hold_epochs to a 1D JAX array of ints
+    he = jnp.atleast_1d(jnp.asarray(hold_epochs, dtype=jnp.int32))
+
+    # Union (logical OR) of the selected epoch masks
+    masks = jnp.stack([_mask_fn(int(e)) for e in he], axis=0)  # [n_hold_epochs, n_steps]
+    mask = jnp.any(masks, axis=0)  # [n_steps], True inside any hold epoch
+
+    # Hold `hold_value` where mask is True; 0 elsewhere.
+    seq = jnp.where(
+        mask, jnp.asarray(hold_value, dtype=jnp.float32), jnp.array(0.0, dtype=jnp.float32)
+    )
+    return seq[:, None]  # shape (n_steps, 1)

@@ -559,7 +559,9 @@ class TaskTrainer(eqx.Module):
                     key_train,
                 )
 
-                update_pbar.subdescription(f"training loss: {losses.total:{LOSS_FMT}}")
+                update_pbar.subdescription(
+                    f"training loss: {losses.total.mean().item():{LOSS_FMT}}"
+                )
 
                 if batch_callbacks is not None and batch in batch_callbacks:
                     for func in batch_callbacks[batch]:
@@ -668,7 +670,10 @@ class TaskTrainer(eqx.Module):
                             losses_validation_mean.total.item(),
                             batch,
                         )
-                        for loss_term_label, loss_term in losses_validation_mean.items():
+                        for (
+                            loss_term_label,
+                            loss_term,
+                        ) in losses_validation_mean.items():
                             self.writer.add_scalar(
                                 f"loss/{ensembled_str}validation/{loss_term_label}",
                                 loss_term.item(),
@@ -919,12 +924,12 @@ def init_task_trainer_history(
 
             n_save_steps = save_steps.shape[0]
             model_train_history = jt.map(
-                lambda x: (jnp.full((n_save_steps,) + x.shape, jnp.nan) if eqx.is_array(x) else x),
+                lambda x: (jnp.full((n_save_steps,) + x.shape, 0.0) if eqx.is_array(x) else x),
                 model_parameters,
             )
         else:
             model_train_history = jt.map(
-                lambda x: jnp.full((n_batches - start_batch,) + x.shape, jnp.nan)
+                lambda x: jnp.full((n_batches - start_batch,) + x.shape, 0.0)
                 if eqx.is_array(x)
                 else x,
                 model_parameters,

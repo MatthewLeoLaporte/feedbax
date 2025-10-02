@@ -73,8 +73,9 @@ packages = ["feedbax"]
 packages = ["feedbax"]
 
 [tool.pyright]
-include = ["feedbax"]
-exclude = ["**/__pycache__"]
+include = ["feedbax", "tests"]
+exclude = ["**/__pycache__", ".venv", ".claude"]
+typeCheckingMode = "standard"
 verboseOutput = true
 reportMissingImports = true
 reportMissingTypeStubs = true

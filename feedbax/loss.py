@@ -34,10 +34,10 @@ TODO:
 #! Can't do this because `AbstractVar` annotations can't be stringified.
 # from __future__ import annotations
 
+import logging
 from abc import abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from functools import cached_property, partial
-import logging
 from typing import (
     TYPE_CHECKING,
     Literal,
@@ -46,16 +46,17 @@ from typing import (
 )
 
 import equinox as eqx
-from equinox import AbstractVar, Module, field
 import jax
 import jax.numpy as jnp
-import jax.tree_util as jtu
 import jax.tree as jt
+import jax.tree_util as jtu
+from equinox import AbstractVar, Module, field
+from jax_cookbook.misc import moving_avg
 from jaxtyping import Array, Float, PyTree
 
+from feedbax._mapping import WhereDict
 from feedbax._model import AbstractModel
 from feedbax.misc import get_unique_label, unzip2
-from feedbax._mapping import WhereDict
 from feedbax.state import State
 
 if TYPE_CHECKING:
@@ -216,9 +217,7 @@ class CompositeLoss(AbstractLoss):
             weight_values = tuple(1.0 for _ in terms)
 
         if not len(terms) == len(weight_values):
-            raise ValueError(
-                "Mismatch between number of loss terms and number of term weights"
-            )
+            raise ValueError("Mismatch between number of loss terms and number of term weights")
 
         # Split into lists of data for simple and composite terms.
         term_tuples_split: Tuple[
@@ -328,14 +327,16 @@ class CompositeLoss(AbstractLoss):
     ) -> Array:
         return self(states, trial_specs, model).total
 
+
 # Maybe rename TargetValueSpec; I feel like a "`TargetSpec`" would include a `where` field
 class TargetSpec(Module):
     """Associate a state's target value with time indices and discounting factors."""
+
     # `value` may be `None` when we specify default values for the other fields
     value: Optional[PyTree[Array]] = None
     # TODO: If `time_idxs` is `Array`, it must be 1D or we'll lose the time dimension before we sum over it!
     time_idxs: Optional[Array] = None
-    discount: Optional[Array] = None # field(default_factory=lambda: jnp.array([1.0]))
+    discount: Optional[Array] = None  # field(default_factory=lambda: jnp.array([1.0]))
 
     def __and__(self, other):
         # Allows user to do `target_zero & target_final_state`, for example.
@@ -385,6 +386,7 @@ class TargetStateLoss(AbstractLoss):
         spec: Gives default/constant values for the substate target, discount, and
             time index.
     """
+
     label: str
     where: Callable
     norm: Callable = lambda x: jnp.sum(x**2, axis=-1)
@@ -411,16 +413,20 @@ class TargetStateLoss(AbstractLoss):
                 targets, where appropriate.
         """
         assert states is not None, "TargetStateLoss requires states, but states is None"
-        assert trial_specs is not None, "TargetStateLoss requires trial_specs, but trial_specs is None"
+        assert trial_specs is not None, (
+            "TargetStateLoss requires trial_specs, but trial_specs is None"
+        )
 
         # TODO: Support PyTrees, not just single arrays
         state = self.where(states)[:, 1:]
 
         if (task_target_spec := trial_specs.targets.get(self.key, None)) is None:
             if self.spec is None:
-                raise ValueError("`TargetSpec` must be provided on construction of "
-                                 "`TargetStateLoss`, or as part of the trial "
-                                 "specifications")
+                raise ValueError(
+                    "`TargetSpec` must be provided on construction of "
+                    "`TargetStateLoss`, or as part of the trial "
+                    "specifications"
+                )
 
             target_spec = self.spec
         elif isinstance(task_target_spec, TargetSpec):
@@ -450,9 +456,7 @@ effector_pos_loss = TargetStateLoss(
     "Effector position",
     where=lambda state: state.mechanics.effector.pos,
     # Euclidean distance
-    norm=lambda *args, **kwargs: (
-        jnp.linalg.norm(*args, axis=-1, **kwargs) ** 2
-    ),
+    norm=lambda *args, **kwargs: (jnp.linalg.norm(*args, axis=-1, **kwargs) ** 2),
 )
 
 
@@ -460,15 +464,69 @@ effector_vel_loss = TargetStateLoss(
     "Effector position",
     where=lambda state: state.mechanics.effector.vel,
     # Euclidean distance
-    norm=lambda *args, **kwargs: (
-        jnp.linalg.norm(*args, axis=-1, **kwargs) ** 2
-    ),
+    norm=lambda *args, **kwargs: (jnp.linalg.norm(*args, axis=-1, **kwargs) ** 2),
     spec=target_final_state,
 )
 
 
+def softmin(values, tau):
+    m = jnp.min(values)
+    return -tau * jnp.log(jnp.sum(jnp.exp(-(values - m) / tau))) + m
+
+
+class StopAtGoalLoss(AbstractLoss):
+    """Encourages the effector to stop at the goal at least once.
+
+    This is different from the typical "be at goal by the end of trial" loss.
+
+    Two methods are provided: "softmin" and "soft-or". Soft-or is based only on the existence of
+    a time window where the effector is at the goal, and so may be preferred if we do not want time
+    pressure (aside from what is implied by `window_len` versus episode length). Softmin may or may
+    not add some time pressure, depending on the other parameters.
+    """
+
+    label: str = "effector_stop_at_goal"
+    method: Literal["softmin", "soft-or"] = "softmin"
+    std_dist: float = 0.025  # how close to goal is "at goal"
+    std_vel: float = 0.05
+    vel_weight: float = 1.0
+    window_len: int = 5  # min no. steps required to be "at goal"
+    # softmin: how soft the min is (small -> credit focused on a single window)
+    # soft-or: how close to the goal we need to be to register as a success
+    tau: float = 0.2
+    eps: float = 1e-6  # to avoid log(0)
+
+    def term(
+        self,
+        states: Optional[PyTree],
+        trial_specs: Optional["TaskTrialSpec"],
+        model: Optional[AbstractModel],
+    ) -> Array:
+        assert states is not None, "StopAtGoalLoss requires states"
+        # assert trial_specs is not None, "StopAtGoalLoss requires trial_specs"
+
+        pos = states.mechanics.effector.pos[:, 1:]
+        vel = states.mechanics.effector.vel[:, 1:]
+        goal = trial_specs.targets["mechanics.effector.pos"].value  # [B, 2]
+
+        dist_sq = jnp.sum((pos - goal) ** 2, axis=-1)
+        vel_sq = jnp.sum(vel**2, axis=-1)
+        c = dist_sq / (self.std_dist**2) + self.vel_weight * vel_sq / (self.std_vel**2)  # [T+1]
+        c_avgs = moving_avg(c, self.window_len)  # [T+1-K]
+
+        if self.method == "softmin":
+            return softmin(c_avgs, self.tau)  # scalar
+        elif self.method == "soft-or":
+            s = jnp.clip(jax.nn.sigmoid(-c_avgs / self.tau), 1e-12, 1.0 - 1e-12)
+            log1m_s = jnp.log1p(-(s - self.eps))
+            log_prod = jnp.sum(log1m_s)
+            p_exist = 1.0 - jnp.exp(log_prod)
+            return -jnp.log(p_exist + self.eps)
+
+
 class ModelLoss(AbstractLoss):
     """Wrapper for functions that take a model, and return a scalar."""
+
     label: str
     loss_fn: Callable[[AbstractModel], Array]
 
@@ -483,10 +541,10 @@ class ModelLoss(AbstractLoss):
 
 
 class EffectorPositionLoss(AbstractLoss):
-    label: str = "Effector position"
-    discount_func: Callable[[int], Float[Array, "#time"]] = (
-        lambda n_steps: power_discount(n_steps, discount_exp=6)[None, :]
-    )
+    label: str = "effector_position"
+    discount_func: Callable[[int], Float[Array, "#time"]] = lambda n_steps: power_discount(
+        n_steps, discount_exp=6
+    )[None, :]
 
     def term(
         self,
@@ -499,7 +557,8 @@ class EffectorPositionLoss(AbstractLoss):
 
         # Sum over X, Y, giving the squared Euclidean distance
         loss = jnp.sum(
-            (states.mechanics.effector.pos[:, 1:] - trial_specs.target.pos) ** 2, axis=-1  # type: ignore
+            (states.mechanics.effector.pos[:, 1:] - trial_specs.target.pos) ** 2,
+            axis=-1,  # type: ignore
         )
 
         # temporal discount
@@ -532,7 +591,7 @@ class EffectorStraightPathLoss(AbstractLoss):
             & task-specified goal position.
     """
 
-    label: str = "Effector path straightness"
+    label: str = "effector_path_straightness"
     normalize_by: Literal["actual", "goal"] = "actual"
 
     def term(
@@ -574,7 +633,7 @@ class EffectorFixationLoss(AbstractLoss):
         label: The label for the loss term.
     """
 
-    label: str = "Effector maintains fixation"
+    label: str = "effector_fixation"
 
     def term(
         self,
@@ -609,7 +668,7 @@ class EffectorVelocityLoss(AbstractLoss):
             time steps near the end of the trial.
     """
 
-    label: str = "Effector position"
+    label: str = "effector_velocity"
     discount_func: Callable[[int], Float[Array, "#time"]] = lambda n_steps: jnp.float32(1.0)
 
     def term(
@@ -623,7 +682,8 @@ class EffectorVelocityLoss(AbstractLoss):
 
         # Sum over X, Y, giving the squared Euclidean distance
         loss = jnp.sum(
-            (states.mechanics.effector.vel[:, 1:] - trial_specs.target.vel) ** 2, axis=-1  # type: ignore
+            (states.mechanics.effector.vel[:, 1:] - trial_specs.target.vel) ** 2,
+            axis=-1,  # type: ignore
         )
 
         # temporal discount
@@ -649,7 +709,7 @@ class EffectorFinalVelocityLoss(AbstractLoss):
         label: The label for the loss term.
     """
 
-    label: str = "Effector final velocity"
+    label: str = "effector_final_velocity"
 
     def term(
         self,
@@ -675,7 +735,7 @@ class NetworkOutputLoss(AbstractLoss):
         label: The label for the loss term.
     """
 
-    label: str = "NN output"
+    label: str = "nn_output"
 
     def term(
         self,
@@ -706,7 +766,7 @@ class NetworkActivityLoss(AbstractLoss):
         label: The label for the loss term.
     """
 
-    label: str = "NN hidden activity"
+    label: str = "nn_hidden"
 
     def term(
         self,
@@ -763,7 +823,7 @@ def nan_safe_mse(
     """
     valid_mask = ~jnp.isnan(targets)
     targets_cleaned = jnp.nan_to_num(targets, nan=0.0)
-    squared_errors = (preds - targets_cleaned)**2
+    squared_errors = (preds - targets_cleaned) ** 2
     masked_squared_errors = jnp.where(valid_mask, squared_errors, 0.0)
     sum_of_squared_errors = jnp.sum(masked_squared_errors)
     num_valid_elements = jnp.sum(valid_mask)
