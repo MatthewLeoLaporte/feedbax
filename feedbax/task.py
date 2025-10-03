@@ -40,7 +40,7 @@ import plotly.graph_objs as go  # pyright: ignore [reportMissingTypeStubs]
 from equinox import AbstractVar, Module, field
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree, Shaped
 
-import feedbax.plotly as plot
+import feedbax.plot.plotly as plot
 from feedbax._mapping import WhereDict
 from feedbax._model import ModelInput
 from feedbax._staged import AbstractStagedModel
@@ -1034,7 +1034,10 @@ class DelayedReaches(AbstractTask):
 
         # Construct time sequences of inputs and targets
         task_inputs, effector_target_states, epoch_start_idxs = self._get_sequences(
-            effector_init_state, effector_target_state, key2
+            effector_init_state,
+            effector_target_state,
+            key2,
+            p_catch=self.p_catch_trial,
         )
 
         return TaskTrialSpec(
@@ -1045,7 +1048,7 @@ class DelayedReaches(AbstractTask):
             targets=WhereDict(
                 {
                     (lambda state: state.mechanics.effector.pos): (
-                        TargetSpec(effector_target_state.pos)  # , discount=self._pos_discount)
+                        TargetSpec(effector_target_states.pos)  # , discount=self._pos_discount)
                     ),
                 }
             ),
@@ -1066,7 +1069,9 @@ class DelayedReaches(AbstractTask):
 
         key_val = jr.PRNGKey(self.seed_validation)
         epochs_keys = jr.split(key_val, effector_init_states.pos.shape[0])
-        task_inputs, effector_target_states, epoch_start_idxs = jax.vmap(self._get_sequences)(
+        #! Assume no catch trials during validation
+        get_sequences = partial(self._get_sequences, p_catch=0.0)
+        task_inputs, effector_target_states, epoch_start_idxs = jax.vmap(get_sequences)(
             effector_init_states, effector_target_states, epochs_keys
         )
 
@@ -1090,29 +1095,49 @@ class DelayedReaches(AbstractTask):
         init_states: CartesianState,
         target_states: CartesianState,
         key: PRNGKeyArray,
+        *,
+        p_catch: float,
     ) -> Tuple[DelayedReachTaskInputs, CartesianState, Int[Array, " n_epochs"]]:
         """Convert static task inputs to sequences, and make hold signal."""
-        epoch_lengths_pre = gen_epoch_lengths(key, self.epoch_len_ranges)
+        key_epochs, key_catch = jr.split(key)
+        epoch_lengths_pre = gen_epoch_lengths(key_epochs, self.epoch_len_ranges)
         remaining_len = (self.n_steps - 1) - jnp.sum(epoch_lengths_pre)
         remaining_len = jnp.maximum(remaining_len, 0)
         epoch_lengths = jnp.concatenate((epoch_lengths_pre, jnp.array([remaining_len])))
         epoch_bounds = jnp.pad(jnp.cumsum(epoch_lengths), (1, 0), constant_values=(0, -1))
         epoch_masks = get_masks(self.n_steps - 1, epoch_bounds)
-        # move_epoch_mask = jnp.logical_not(jnp.prod(epoch_masks, axis=0))[None, :]
 
-        stim_seqs = get_masked_seqs(
-            _forceless_task_inputs(target_states),
-            epoch_masks[self.target_on_epochs],
-        )
+        # Target information for cost function
         target_seqs = jt.map(
             lambda x, y: x + y,
             get_masked_seqs(target_states, epoch_masks[self.move_epochs]),
             get_masked_seqs(init_states, epoch_masks[self.hold_epochs]),
         )
+        # Target information received by the model
+        # Target position and velocity
+        stim_seqs = get_masked_seqs(
+            _forceless_task_inputs(target_states),
+            epoch_masks[self.target_on_epochs],
+        )
+        # 0/1 signal indicating whether target information is being supplied
         stim_on_seq = get_scalar_epoch_seq(
             epoch_bounds, self.n_steps - 1, 1.0, self.target_on_epochs
         )
+        # 0/1 go/hold signal to move
         hold_seq = get_scalar_epoch_seq(epoch_bounds, self.n_steps - 1, 1.0, self.hold_epochs)
+
+        # Handle catch trials
+        is_catch = jr.bernoulli(key_catch, p_catch)
+        init_seqs_full = jt.map(
+            lambda x: jnp.broadcast_to(x, (self.n_steps - 1, *x.shape)),
+            init_states,
+        )
+        target_seqs = jt.map(
+            lambda normal, catch: jnp.where(is_catch, catch, normal),
+            target_seqs,
+            init_seqs_full,
+        )
+        hold_seq = jnp.where(is_catch, jnp.ones_like(hold_seq), hold_seq)
 
         task_input = DelayedReachTaskInputs(stim_seqs, hold_seq, stim_on_seq)
         target_states = target_seqs
@@ -1360,7 +1385,7 @@ def get_scalar_epoch_seq(
     he = jnp.atleast_1d(jnp.asarray(hold_epochs, dtype=jnp.int32))
 
     # Union (logical OR) of the selected epoch masks
-    masks = jnp.stack([_mask_fn(int(e)) for e in he], axis=0)  # [n_hold_epochs, n_steps]
+    masks = jnp.stack([_mask_fn(e) for e in he], axis=0)  # [n_hold_epochs, n_steps]
     mask = jnp.any(masks, axis=0)  # [n_steps], True inside any hold epoch
 
     # Hold `hold_value` where mask is True; 0 elsewhere.
