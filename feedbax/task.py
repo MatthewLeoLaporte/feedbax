@@ -15,8 +15,8 @@ TODO:
 # from __future__ import annotations
 
 import logging
-from abc import abstractmethod, abstractproperty
-from collections.abc import Callable, Mapping, MutableSequence, Sequence
+from abc import abstractmethod
+from collections.abc import Callable, Iterable, Mapping, MutableSequence, Sequence
 from functools import cached_property, partial
 from typing import (
     TYPE_CHECKING,
@@ -40,7 +40,7 @@ import plotly.graph_objs as go  # pyright: ignore [reportMissingTypeStubs]
 from equinox import AbstractVar, Module, field
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree, Shaped
 
-import feedbax.plot.plotly as plot
+import feedbax.plot.trajectories as plot
 from feedbax._mapping import WhereDict
 from feedbax._model import ModelInput
 from feedbax._staged import AbstractStagedModel
@@ -60,8 +60,6 @@ from feedbax.loss import (
     LossDict,
     TargetSpec,
     power_discount,
-    target_final_state,
-    target_zero,
 )
 from feedbax.misc import BatchInfo, is_module, is_none
 from feedbax.state import CartesianState, StateT
@@ -73,6 +71,170 @@ logger = logging.getLogger(__name__)
 
 
 N_DIM = 2
+
+
+def _validate_jittable(n_steps: int, eb: jnp.ndarray | None, es: jnp.ndarray | None):
+    """Safe under jit/vmap; supports eb ∈ {(E+1,), (B, E+1)} and es ∈ {(M,), (B, M)}."""
+
+    if eb is not None:
+        # Nondecreasing along the last axis
+        nondec_per = jnp.all(eb[..., 1:] >= eb[..., :-1], axis=-1)
+        eb = eqx.error_if(eb, ~jnp.all(nondec_per), "epoch_bounds must be nondecreasing")
+
+        # First == 0 (if you enforce this)
+        first_ok = eb[..., 0] == 0
+        eb = eqx.error_if(eb, ~jnp.all(first_ok), "recommend epoch_bounds[0] == 0")
+
+        # Last ≤ n_steps
+        last_ok = eb[..., -1] <= n_steps
+        eb = eqx.error_if(eb, ~jnp.all(last_ok), "epoch_bounds[-1] must be ≤ n_steps")
+
+    if es is not None:
+        in_range = (es >= 0) & (es < n_steps)
+        es = eqx.error_if(es, ~jnp.all(in_range), "event_steps out of range")
+
+    return eb, es
+
+
+class TrialTimeline(Module):
+    """A typed, optional timeline: contiguous epochs + named point events.
+
+    Invariants:
+      - If `epoch_bounds` is present with length E+1, `epoch_names` has length E
+      - epoch_bounds is nondecreasing; epoch_bounds[0] == 0; epoch_bounds[-1] == n_steps (preferred)
+      - event_steps are in [0, n_steps)
+    """
+
+    n_steps: int
+
+    # Epoch partition
+    epoch_bounds: Optional[jnp.ndarray] = None  # shape (E+1,), int
+    epoch_names: Tuple[str, ...] = eqx.field(default_factory=tuple, static=True)
+    # Point events
+    event_steps: Optional[jnp.ndarray] = None  # shape (M,), int
+    event_names: Tuple[str, ...] = eqx.field(default_factory=tuple, static=True)
+
+    # Fast name→index maps (static, not in the PyTree)
+    _epoch_to_idx: dict[str, int] = eqx.field(default_factory=dict, static=True)
+    _event_to_idx: dict[str, int] = eqx.field(default_factory=dict, static=True)
+
+    @classmethod
+    def from_epochs_events(
+        cls,
+        n_steps: int,
+        epoch_bounds: Optional[Iterable[int]] = None,
+        epoch_names: Optional[Iterable[str]] = None,
+        event_steps: Optional[Iterable[int]] = None,
+        event_names: Optional[Iterable[str]] = None,
+    ) -> "TrialTimeline":
+        eb = None if epoch_bounds is None else jnp.asarray(epoch_bounds, dtype=jnp.int32)
+        en = tuple(epoch_names or ())
+        es = None if event_steps is None else jnp.asarray(event_steps, dtype=jnp.int32)
+        evn = tuple(event_names or ())
+
+        eb, es = _validate_jittable(n_steps, eb, es)
+
+        epoch_map = {name: i for i, name in enumerate(en)} if en else {}
+        event_map = {name: i for i, name in enumerate(evn)} if evn else {}
+
+        return cls(
+            n_steps=n_steps,
+            epoch_bounds=eb,
+            epoch_names=en,
+            event_steps=es,
+            event_names=evn,
+            _epoch_to_idx=epoch_map,
+            _event_to_idx=event_map,
+        )
+
+    @property
+    def has_epochs(self) -> bool:
+        return self.epoch_bounds is not None and len(self.epoch_names) > 0
+
+    def epoch_idx_at(self, t: int) -> int:
+        """Return epoch index k such that bounds[k] ≤ t < bounds[k+1], or -1 if unknown."""
+        if self.epoch_bounds is None:
+            return -1
+        # searchsorted is jittable
+        k = jnp.searchsorted(self.epoch_bounds, jnp.asarray(t, dtype=jnp.int32), side="right") - 1
+        # Clamp to [-1, E-1]
+        E = self.epoch_bounds.shape[0] - 1
+        return jnp.where((k >= 0) & (k < E), k, -1)
+
+    def epoch_bounds_by_idx(self, k):
+        """JAX-safe: returns (s, e) as jnp.int32 scalars; OK if `k` is traced."""
+        eb = self.epoch_bounds
+        if eb is None:
+            raise ValueError("No epoch bounds available")
+
+        k = jnp.asarray(k, jnp.int32)
+        s = jax.lax.dynamic_index_in_dim(eb, k, keepdims=False)
+        e = jax.lax.dynamic_index_in_dim(eb, k + jnp.int32(1), keepdims=False)
+        return s, e
+
+    def epoch_mask_by_idx(self, k: int) -> jnp.ndarray:
+        """Boolean mask of timesteps in epoch k."""
+        s, e = self.epoch_bounds_by_idx(k)
+        return (jnp.arange(self.n_steps) >= s) & (jnp.arange(self.n_steps) < e)
+
+    def epoch_idx(self, name: str) -> int:
+        return self._epoch_to_idx[name]
+
+    def epoch_bounds_by_name(self, name: str) -> tuple[int, int]:
+        return self.epoch_bounds_by_idx(self.epoch_idx(name))
+
+    def epoch_mask(self, name: str) -> jnp.ndarray:
+        return self.epoch_mask_by_idx(self.epoch_idx(name))
+
+    def event_time(self, name: str) -> int:
+        assert self.event_steps is not None, "No events available"
+        i = self._event_to_idx[name]
+        return int(self.event_steps[i])
+
+    def epoch_name_at(self, t: int) -> Optional[str]:
+        k = int(self.epoch_idx_at(t))
+        if k == -1:
+            return None
+        return self.epoch_names[k]
+
+    def events_at(self, t: int) -> list[str]:
+        if self.event_steps is None:
+            return []
+        t = int(t)
+        # Small list comp is fine; this is not meant for huge M in hot loops
+        return [
+            name for name, step in zip(self.event_names, list(self.event_steps)) if int(step) == t
+        ]
+
+    def window_for_epoch(self, name: str) -> tuple[int, int]:
+        """Alias for epoch_bounds_by_name, reads nicely at call site."""
+        return self.epoch_bounds_by_name(name)
+
+    def window_for_event_centered(
+        self, name: str, before: int, after: int, clamp: bool = True
+    ) -> tuple[int, int]:
+        """Return [t0, t1) around an event (e.g., analysis windows)."""
+        t = self.event_time(name)
+        t0 = t - before
+        t1 = t + after
+        if clamp:
+            t0 = max(0, t0)
+            t1 = min(self.n_steps, t1)
+        return t0, t1
+
+    @property
+    def batch_axes(self):
+        # Mark only array leaves with axis 0; everything else None
+        return TrialTimeline(
+            n_steps=None,
+            epoch_bounds=0 if self.epoch_bounds is not None else None,
+            event_steps=0 if self.event_steps is not None else None,
+            # the rest are static..
+            epoch_names=self.epoch_names,
+            event_names=self.event_names,
+            _epoch_to_idx=self._epoch_to_idx,
+            _event_to_idx=self._event_to_idx,
+        )
 
 
 class TaskTrialSpec(Module):
@@ -91,6 +253,8 @@ class TaskTrialSpec(Module):
             to the model, so that it may complete the task.
         intervene: A mapping from unique intervenor names, to per-trial
             intervention parameters.
+        timeline: Information about timing of events during the trial; e.g. different phases or
+            epochs.
         extra: Additional trial information, such as may be useful for plotting or
             analysis of the task, but which is not appropriate to include in the
             other fields.
@@ -101,6 +265,7 @@ class TaskTrialSpec(Module):
     inputs: PyTree
     # target: AbstractVar[PyTree[Array]]
     intervene: Mapping[IntervenorLabelStr, AbstractIntervenorInput] = field(default_factory=dict)
+    timeline: Optional[TrialTimeline] = None
     extra: Optional[Mapping[str, Array]] = None
 
     @property
@@ -114,6 +279,7 @@ class TaskTrialSpec(Module):
             ),
             inputs=0,
             intervene=0,
+            timeline=self.timeline.batch_axes if self.timeline is not None else None,
             extra=0,
         )
 
@@ -938,6 +1104,7 @@ class SimpleReaches(AbstractTask):
                     # },
                 }
             ),
+            timeline=TrialTimeline(self.n_steps),
         )
 
     @property
@@ -1010,6 +1177,7 @@ class DelayedReaches(AbstractTask):
             (10, 20),  # target on ("stim")
         )
     )
+    epoch_names: Sequence[str] = ("hold", "target_on", "movement")
     hold_epochs: Int[Array, " _"] = field(default=(0, 1), converter=jnp.asarray)
     target_on_epochs: Int[Array, " _"] = field(default=(1, 2), converter=jnp.asarray)
     move_epochs: Int[Array, " _"] = field(default=(2,), converter=jnp.asarray)
@@ -1017,6 +1185,14 @@ class DelayedReaches(AbstractTask):
     eval_n_directions: int = 7
     eval_reach_length: float = 0.5
     eval_grid_n: int = 1
+
+    def __check_init__(self):
+        if len(self.epoch_len_ranges) + 1 != len(self.epoch_names):
+            err_msg = (
+                "The number of epoch length ranges must be one less than the number of epoch names."
+            )
+            logger.error(err_msg)
+            raise ValueError(err_msg)
 
     def get_train_trial(
         self, key: PRNGKeyArray, batch_info: Optional[BatchInfo] = None
@@ -1033,7 +1209,7 @@ class DelayedReaches(AbstractTask):
         effector_init_state, effector_target_state = _pos_only_states(effector_pos_endpoints)
 
         # Construct time sequences of inputs and targets
-        task_inputs, effector_target_states, epoch_start_idxs = self._get_sequences(
+        task_inputs, effector_target_states, epoch_bounds = self._get_sequences(
             effector_init_state,
             effector_target_state,
             key2,
@@ -1052,7 +1228,11 @@ class DelayedReaches(AbstractTask):
                     ),
                 }
             ),
-            extra=dict(epoch_start_idxs=epoch_start_idxs),
+            timeline=TrialTimeline.from_epochs_events(
+                self.n_steps,
+                epoch_bounds=epoch_bounds,
+                epoch_names=self.epoch_names,
+            ),
         )
 
     def get_validation_trials(self, key: PRNGKeyArray) -> TaskTrialSpec:
@@ -1071,7 +1251,7 @@ class DelayedReaches(AbstractTask):
         epochs_keys = jr.split(key_val, effector_init_states.pos.shape[0])
         #! Assume no catch trials during validation
         get_sequences = partial(self._get_sequences, p_catch=0.0)
-        task_inputs, effector_target_states, epoch_start_idxs = jax.vmap(get_sequences)(
+        task_inputs, effector_target_states, epoch_bounds = jax.vmap(get_sequences)(
             effector_init_states, effector_target_states, epochs_keys
         )
 
@@ -1087,7 +1267,11 @@ class DelayedReaches(AbstractTask):
                     ),
                 }
             ),
-            extra=dict(epoch_start_idxs=epoch_start_idxs),
+            timeline=TrialTimeline.from_epochs_events(
+                self.n_steps,
+                epoch_bounds=epoch_bounds,
+                epoch_names=self.epoch_names,
+            ),
         )
 
     def _get_sequences(
@@ -1209,6 +1393,7 @@ class Stabilization(AbstractTask):
                     ),
                 }
             ),
+            timeline=TrialTimeline(self.n_steps),
         )
 
     def validation_plots(self, states, trial_specs=None) -> Mapping[str, go.Figure]:
@@ -1254,6 +1439,7 @@ class Stabilization(AbstractTask):
                     ),
                 }
             ),
+            timeline=TrialTimeline(self.n_steps),
         )
 
     @property
