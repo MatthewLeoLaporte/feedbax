@@ -8,38 +8,38 @@ TODO:
 :license: Apache 2.0, see LICENSE for details.
 """
 
+import io
+import logging
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
-import io
 from itertools import zip_longest
-import logging
-from typing import Any, Literal, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal, Optional, Tuple
 
 import equinox as eqx
 import jax
-import jax.tree as jt
 import jax.numpy as jnp
 import jax.random as jr
+import jax.tree as jt
 import jax.tree_util as jtu
-from jaxtyping import Float, Array, Int, PRNGKeyArray, PyTree
 import matplotlib.axes as mplax
 import matplotlib.cm as mplcm
 import matplotlib.colors as mplc
-from matplotlib import animation, gridspec
-from matplotlib.axes import Axes
-from matplotlib.figure import Figure
-from matplotlib.ticker import FormatStrFormatter
 import matplotlib.pyplot as plt
-from matplotlib.pyplot import get_cmap  # type: ignore
-from matplotlib.typing import ColorType
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
+from matplotlib import animation, gridspec
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.pyplot import get_cmap  # type: ignore
+from matplotlib.ticker import FormatStrFormatter
+from matplotlib.typing import ColorType
 
 from feedbax.bodies import SimpleFeedbackState
-from feedbax.loss import LossDict
-from feedbax.state import CartesianState
+from feedbax.loss import TermTree
 from feedbax.misc import corners_2d
+from feedbax.state import CartesianState
 from feedbax.task import TaskTrialSpec
 
 if TYPE_CHECKING:
@@ -89,9 +89,7 @@ class SeabornFig2Grid:
         h2 = self.sg.ax_marg_x.get_position().height
         r = int(np.round(h / h2))
         self._resize()
-        self.subgrid = gridspec.GridSpecFromSubplotSpec(
-            r + 1, r + 1, subplot_spec=self.subplot
-        )
+        self.subgrid = gridspec.GridSpecFromSubplotSpec(r + 1, r + 1, subplot_spec=self.subplot)
 
         self._moveaxes(self.sg.ax_joint, self.subgrid[1:, :-1])
         self._moveaxes(self.sg.ax_marg_x, self.subgrid[0, :-1])
@@ -151,6 +149,7 @@ def joint_pos_trajectory(
         ax = fig.add_subplot()
     else:
         fig = ax.get_figure()
+        assert isinstance(fig, Figure)
         if fig is None:
             raise ValueError("The provided axes has no figure.")
 
@@ -181,7 +180,7 @@ def joint_pos_trajectory(
         ax.plot(*corners, "w--", lw=0.8)
 
     if colorbar:
-        t0t1= (0, 1)
+        t0t1 = (0, 1)
         fig.colorbar(
             mplcm.ScalarMappable(mplc.Normalize(*t0t1), cmap),
             ax=ax,
@@ -227,9 +226,7 @@ def paths_3D(
 
     for i in range(paths.shape[0]):
         for idxs, ls in zip(
-            zip_longest(
-                epoch_start_idxs[i], epoch_start_idxs[i, 1:] + 1, fillvalue=None
-            ),
+            zip_longest(epoch_start_idxs[i], epoch_start_idxs[i, 1:] + 1, fillvalue=None),
             epoch_linestyles,
         ):
             ts = slice(*idxs)
@@ -265,9 +262,7 @@ def planes(
         for j in range(x.shape[0]):
             for k, (idxs, ls) in enumerate(
                 zip(
-                    zip_longest(
-                        epoch_start_idxs[j], epoch_start_idxs[j, 1:], fillvalue=None
-                    ),
+                    zip_longest(epoch_start_idxs[j], epoch_start_idxs[j, 1:], fillvalue=None),
                     epoch_linestyles,
                 )
             ):
@@ -285,7 +280,7 @@ def planes(
                     color=color,
                 )
                 axs[i].set_xlabel(f"{label:}{p:}")
-                axs[i].set_ylabel(f"{label:}{p+1:}")
+                axs[i].set_ylabel(f"{label:}{p + 1:}")
 
     plt.tight_layout()
     return (axs,)
@@ -296,9 +291,7 @@ def effector_trajectories(
     where_data: Optional[Callable] = None,
     step: int = 1,  # plot every step-th trial
     trial_specs: Optional[TaskTrialSpec] = None,
-    endpoints: Optional[
-        Tuple[Float[Array, "trial xy=2"], Float[Array, "trial xy=2"]]
-    ] = None,
+    endpoints: Optional[Tuple[Float[Array, "trial xy=2"], Float[Array, "trial xy=2"]]] = None,
     straight_guides: bool = False,
     workspace: Optional[Float[Array, "bounds=2 xy=2"]] = None,
     cmap_name: Optional[str] = None,
@@ -352,8 +345,7 @@ def effector_trajectories(
         )
     elif where_data is None:
         raise ValueError(
-            "If `states` is not a `SimpleFeedbackState`, "
-            "`where_data` must be provided."
+            "If `states` is not a `SimpleFeedbackState`, `where_data` must be provided."
         )
     else:
         positions, velocities, controls = where_data(states)
@@ -365,7 +357,7 @@ def effector_trajectories(
             cmap_name = "viridis"
 
     if endpoints is not None:
-        endpoints_arr = np.array(endpoints)  #type: ignore
+        endpoints_arr = np.array(endpoints)  # type: ignore
     else:
         if trial_specs is not None:
             target_specs = trial_specs.targets["mechanics.effector.pos"]
@@ -389,12 +381,10 @@ def effector_trajectories(
     if colors is None:
         cmap_func = get_cmap(cmap_name)
         colors = [
-            cmap_func(i) if color is None else color
-            for i in np.linspace(0, 1, positions.shape[0])
+            cmap_func(i) if color is None else color for i in np.linspace(0, 1, positions.shape[0])
         ]
 
     for i in range(0, positions.shape[0], step):
-
         axs[0].plot(
             positions[i, :, 0],
             positions[i, :, 1],
@@ -429,9 +419,7 @@ def effector_trajectories(
             )
 
         # velocity
-        axs[1].plot(
-            velocities[i, :, 0], velocities[i, :, 1], "-o", color=colors[i], ms=ms
-        )
+        axs[1].plot(velocities[i, :, 0], velocities[i, :, 1], "-o", color=colors[i], ms=ms)
 
         if controls is not None:
             # force (start at timestep 1; timestep 0 is always 0)
@@ -585,9 +573,7 @@ def activity_sample_units(
     elif len(activities.shape) != 3:
         raise ValueError("Invalid shape for ")
 
-    unit_idxs = jr.choice(
-        key, jnp.arange(activities.shape[-1]), (n_samples,), replace=False
-    )
+    unit_idxs = jr.choice(key, jnp.arange(activities.shape[-1]), (n_samples,), replace=False)
     if unit_includes is not None:
         unit_idxs = jnp.concatenate([unit_idxs, jnp.array(unit_includes)])
     x = activities[..., unit_idxs]
@@ -611,9 +597,7 @@ def activity_sample_units(
         for j in range(unit.shape[0]):
             axs[row][col].plot(unit[j], color=colors[j], lw=1.5)
         axs[row][col].set_ylabel("Unit {} output".format(unit_idxs[i]))
-        axs[row][col].hlines(
-            0, xmin=0, xmax=unit.shape[1], linewidths=1, linestyles="dotted"
-        )
+        axs[row][col].hlines(0, xmin=0, xmax=unit.shape[1], linewidths=1, linestyles="dotted")
 
     for j in range(cols):
         axs[-1][-j - 1].set_xlabel(xlabel)
@@ -622,7 +606,7 @@ def activity_sample_units(
 
 
 def loss_history(
-    losses: LossDict,
+    losses: TermTree,
     xscale: str = "log",
     yscale: str = "log",
     cmap_name: str = "Set1",
@@ -630,7 +614,7 @@ def loss_history(
     """Line plot of loss terms and their total over a training run.
 
     !!! Note
-        Each term in a `LossDict` is an array where the first dimension is the
+        Each term in a `TermTree` is an array where the first dimension is the
         training iteration, with an optional second batch dimension, e.g. for model
         replicates.
 
@@ -654,9 +638,11 @@ def loss_history(
     cmap = get_cmap(cmap_name)
     colors = [cmap(i) for i in np.linspace(0, 1, len(losses))]
 
-    xs = 1 + np.arange(len(losses.total))
+    losses_total = losses.total
 
-    total = ax.plot(xs, losses.total, "black", lw=3)
+    xs = 1 + np.arange(len(losses_total))
+
+    total = ax.plot(xs, losses_total, "black", lw=3)
 
     all_handles = [total]
     for i, loss_term in enumerate(losses.values()):
@@ -675,13 +661,10 @@ def loss_history(
 
 
 def _losses_terms_dfs(losses):
-
     if isinstance(losses, Array):
         losses_arr: Array = losses
-        losses_terms_dfs = {
-            "Total": pd.DataFrame(losses.T, index=range(losses_arr.shape[1]))
-        }
-    elif isinstance(losses, LossDict):
+        losses_terms_dfs = {"Total": pd.DataFrame(losses.T, index=range(losses_arr.shape[1]))}
+    elif isinstance(losses, TermTree):
         losses_terms_dfs = jt.map(
             lambda losses: pd.DataFrame(losses.T, index=range(losses.shape[1])).melt(
                 var_name="Iteration", value_name="Loss"
@@ -695,7 +678,7 @@ def _losses_terms_dfs(losses):
 
 
 def loss_mean_history(
-    losses: LossDict,
+    losses: TermTree,
     xscale: str = "log",
     yscale: str = "log",
     cmap: str = "Set1",
@@ -769,7 +752,6 @@ def reach_endpoint_dists(
         )
     else:
         raise ValueError("No effector position targets available in trial specs")
-
 
     endpoint_pos_dfs = jt.map(
         lambda arr: pd.DataFrame(arr.pos, columns=("x", "y")),
@@ -851,7 +833,7 @@ def task_profiles(
     return fig, axs
 
 
-LineStyle = Literal['solid', 'dashed', 'dashdot', 'dotted']
+LineStyle = Literal["solid", "dashed", "dashdot", "dotted"]
 
 
 def speed_profiles(
@@ -867,7 +849,7 @@ def speed_profiles(
 
     For example: does the network start moving before the go cue is given?
     """
-    speed = jnp.sqrt(jnp.sum(vel ** 2, axis=-1))
+    speed = jnp.sqrt(jnp.sum(vel**2, axis=-1))
 
     if colors is None:
         cmap = get_cmap(cmap_name)
@@ -886,7 +868,8 @@ def speed_profiles(
         vline_specs = ()
 
     fig, ax = plt.subplots(
-        1, 1,
+        1,
+        1,
         constrained_layout=True,
     )
 
@@ -898,7 +881,7 @@ def speed_profiles(
     if vline_idxs is not None:
         for idxs, label, style in vline_specs:
             if style is None:
-                style = 'solid'
+                style = "solid"
                 linewidth = 0
             else:
                 linewidth = 1
@@ -919,9 +902,8 @@ def speed_profiles(
     if vline_idxs is not None and vline_labels is not None:
         ax.legend()
 
-
     # ax.yaxis.set_major_formatter(FormatStrFormatter("%.2e"))
-    ax.ticklabel_format(axis='y', style='sci', scilimits=(-2, 3))
+    ax.ticklabel_format(axis="y", style="sci", scilimits=(-2, 3))
 
     ax.set_xlabel("Time step")
     ax.set_ylabel("Speed")
@@ -941,7 +923,7 @@ def task_and_speed_profiles(
 
     For example: does the network start moving before the go cue is given?
     """
-    speed = jnp.sqrt(jnp.sum(vel ** 2, axis=-1))
+    speed = jnp.sqrt(jnp.sum(vel**2, axis=-1))
 
     task_rows = len(task_variables)
 
@@ -1032,17 +1014,15 @@ def animate_arm2(
     if add_root:
         xy = jnp.pad(xy, ((0, 0), (1, 0), (0, 0)))
 
-    arm_line, = ax.plot(*xy[0].T, "k-")
-    traj_line, = ax.plot(*xy[0, -1].T, "g-")
+    (arm_line,) = ax.plot(*xy[0].T, "k-")
+    (traj_line,) = ax.plot(*xy[0, -1].T, "g-")
 
     def animate(i):
         arm_line.set_data(*xy[i].T)
         traj_line.set_data(*xy[: i + 1, -1].T)
         return (fig,)
 
-    return animation.FuncAnimation(
-        fig, animate, frames=len(xy), interval=interval, blit=True
-    )
+    return animation.FuncAnimation(fig, animate, frames=len(xy), interval=interval, blit=True)
 
 
 def animate_3D_rotate(
@@ -1138,9 +1118,7 @@ def fig_to_img_arr(fig, norm=True):
     )
     io_buf.close()
 
-    img_arr = np.swapaxes(
-        img_arr, 0, 2
-    )  # in TF+TB version >= 1.8, RGB channel is dim 0
+    img_arr = np.swapaxes(img_arr, 0, 2)  # in TF+TB version >= 1.8, RGB channel is dim 0
     img_arr = np.swapaxes(img_arr, 1, 2)  # rotate figure 90 deg
 
     plt.close(fig)
@@ -1162,13 +1140,13 @@ def get_high_contrast_neutral_shade():
 
 
 def circular_hist(
-    x, 
-    ax=None, 
-    bins=16, 
-    density=True, 
-    offset=0, 
-    gaps=True, 
-    mean=False, 
+    x,
+    ax=None,
+    bins=16,
+    density=True,
+    offset=0,
+    gaps=True,
+    mean=False,
     normalize_by_other=None,
 ):
     """Produce a circular histogram of angles on ax.
@@ -1231,7 +1209,7 @@ def circular_hist(
 
     # Compute width of each bin
     widths = np.diff(bins)
-    
+
     if normalize_by_other is not None:
         n_other, _ = np.histogram(normalize_by_other, bins=bins)
         n = n / n_other

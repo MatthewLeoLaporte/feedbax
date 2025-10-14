@@ -127,7 +127,7 @@ def profiles(
                 go.Scatter(
                     name=label,
                     showlegend=(i == 0 and label is not None),
-                    # legendgroup=label,
+                    legendgroup=label,
                     x=ts,
                     y=mean,
                     marker_size=3,
@@ -143,7 +143,7 @@ def profiles(
                         go.Scatter(
                             name=label,
                             showlegend=False,
-                            # legendgroup=label,
+                            legendgroup=label,
                             x=ts,
                             y=curve,
                             mode="lines",
@@ -157,7 +157,7 @@ def profiles(
                     [  # Bounds
                         go.Scatter(
                             name="Upper bound",
-                            # legendgroup=label,
+                            legendgroup=label,
                             x=ts,
                             y=ub,
                             line=dict(color="rgba(255,255,255,0)"),
@@ -166,7 +166,7 @@ def profiles(
                         ),
                         go.Scatter(
                             name="Lower bound",
-                            # legendgroup=label,
+                            legendgroup=label,
                             x=ts,
                             y=lb,
                             line=dict(color="rgba(255,255,255,0)"),

@@ -2,30 +2,20 @@
 
 TODO:
 
-- `LossDict` only computes the total loss once, but when we append a `LossDict`
-  for a single timestep to `losses_history` in `TaskTrainer`, we lose the loss
-  total for that time step. When it is needed later (e.g. on plotting the loss)
-  it will be recomputed, once. It is also not serialized along with the
-  `losses_history`. I doubt this is a significant computational loss
-  (how many loss terms * training iterations could be involved? 1e6?)
-  to have to compute from time to time, but perhaps it would be nice to
-  include the total as part of flatten/unflatten. It'd probably just require
-  that we allow passing the total on instantiation, however that would be kind
-  of weird.
-    - Even if we have 6 loss terms with 1e6 iterations, it only takes ~130 ms
-    to compute `losses.total`. Given that we only need to compute this once
-    per session or so, it shouldn't be a problem.
 - The time aggregation could be done in `CompositeLoss`, if we unsqueeze
   terms that don't have a time dimension. This would allow time aggregation
   to be controlled in one place, if for some reason it makes sense to change
   how this aggregation occurs across all loss terms.
+  - Actually I think the time aggregation should probably be left to the
+    specific implementation; consider that we might want to do dynamic slicing
+    and aggregation which involves vmapping over a function in which the time
+    aggregation occurs.
 - Protocols for all the different `state` types/fields?
     - Alternatively we could make `AbstractLoss` generic over a
       `StateT` typevar, however that might not make sense for typing
       the compositions (e.g. `__sum__`) since the composite can support any
       state pytrees that have the right combination of fields, not just pytrees
       that have an identical structure.
-- L2 by default, but should allow for other norms
 
 :copyright: Copyright 2023-2024 by Matt Laporte.
 :license: Apache 2.0. See LICENSE for details.
@@ -40,9 +30,14 @@ from collections.abc import Callable, Mapping, Sequence
 from functools import cached_property, partial
 from typing import (
     TYPE_CHECKING,
+    Any,
+    Generic,
     Literal,
     Optional,
+    Self,
     Tuple,
+    TypeVar,
+    Union,
 )
 
 import equinox as eqx
@@ -51,8 +46,8 @@ import jax.numpy as jnp
 import jax.tree as jt
 import jax.tree_util as jtu
 from equinox import AbstractVar, Module, field
-from jax_cookbook.misc import moving_avg
-from jaxtyping import Array, Float, PyTree
+from jax_cookbook.misc import moving_avg, softmin
+from jaxtyping import Array, ArrayLike, Float, PyTree
 
 from feedbax._mapping import WhereDict
 from feedbax._model import AbstractModel
@@ -67,43 +62,105 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@jtu.register_pytree_node_class
-class LossDict(dict[str, Array]):
-    """Dictionary that provides a sum over its values."""
+#! TODO: Could make Generic over associated node type; e.g. `TermTree[AbstractLoss]` where each
+#! tree node keeps a reference to the `AbstractLoss` term that generated it?
+class TermTree[T](eqx.Module, Mapping[str, "TermTree"]):
+    label: str
+    names: Tuple[str, ...]
+    children: Tuple[Self, ...] = ()
+    value: Optional[Array] = None  # only for leaf
+    weight: float = 1.0
+    leaf_fn: Callable[[Array], Array] = jnp.mean
+    originator: Optional[T] = field(default=None, static=True)
 
-    @cached_property
+    @staticmethod
+    def leaf(
+        label: str, value: Array, *, weight: float = 1.0, originator: Optional[T] = None
+    ) -> "TermTree":
+        return TermTree(
+            label=label, names=(), children=(), value=value, weight=weight, originator=originator
+        )
+
+    @staticmethod
+    def branch(
+        label: str,
+        mapping: Mapping[str, "TermTree"],
+        *,
+        weight: float = 1.0,
+        originator: Optional[T] = None,  #! I don't think this should use the class generic T
+    ) -> "TermTree":
+        # Freeze order for JIT-stability
+        names = tuple(mapping.keys())
+        kids = tuple(mapping[k] for k in names)
+        return TermTree(
+            label=label,
+            names=names,
+            children=kids,
+            value=None,
+            weight=weight,
+            originator=originator,
+        )
+
+    def with_weight(self, w: float) -> Self:
+        # Scale just this node (composes multiplicatively through .total).
+        return eqx.tree_at(lambda t: t.weight, self, w)
+
+    @property
     def total(self) -> Array:
-        """Elementwise sum over all values in the dictionary."""
-        loss_term_values = list(self.values())
-        return jax.tree_util.tree_reduce(lambda x, y: x + y, loss_term_values)
-        # return jnp.sum(jtu.tree_map(
-        #     lambda *args: sum(args),
-        #     *loss_term_values
-        # ))
+        """Return the node-weighted scalar sum of all leaves in this tree."""
+        if self.value is not None:
+            value = self.leaf_fn(self.value)
+            return self.weight * value
+        else:
+            s = jnp.array(0.0)
+            for c in self.children:
+                s = s + c.total
+            return self.weight * s
 
-    def __setitem__(self, key, value):
-        raise TypeError("LossDict does not support item assignment")
+    def flatten(self, *, prefix: str = "", apply_weights: bool = True) -> Mapping[str, Array]:
+        """
+        Returns { 'path/to/node': scalar } for leaves.
+        If apply_weights=True, each value is the fully-weighted contribution down the path.
+        """
+        base = f"{prefix}{self.label}"
+        out = {}
+        if self.value is not None:
+            v = self.value
+            if apply_weights:
+                v = self.total  # already includes this node's weight
+            out[base] = v
+            return out
+        for name, child in zip(self.names, self.children):
+            sub = child.flatten(prefix=base + "/", apply_weights=apply_weights)
+            out.update(sub)
+        return out
 
-    def update(self, other=(), /, **kwargs):
-        raise TypeError("LossDict does not support update")
+    def __len__(self):
+        return len(self.children)
 
-    def tree_flatten(self):
-        """The same flatten function used by JAX for `dict`"""
-        return unzip2(sorted(self.items()))[::-1]
+    def __iter__(self):
+        return iter(self.names)
 
-    @classmethod
-    def tree_unflatten(cls, keys, values):
-        return LossDict(zip(keys, values))
+    def __getitem__(self, k: str) -> Self:
+        i = self.names.index(k)
+        return self.children[i]
 
 
-def is_lossdict(x):
-    return isinstance(x, LossDict)
+def is_termtree(x):
+    return isinstance(x, TermTree)
 
 
 class AbstractLoss(Module):
     """Abstract base class for loss functions.
 
     Instances can be composed by addition and scalar multiplication.
+
+    For leaf loss terms, subclass this and implement the `term` method.
+
+    For nodes composed of multiple weighted terms, instantiate `CompositeLoss`.
+
+    For a composite leaf that includes multiple weighted sub-terms that all
+    depend on shared variables, instantiate `FuncTermsLoss`.
     """
 
     label: AbstractVar[str]
@@ -113,10 +170,9 @@ class AbstractLoss(Module):
         states: PyTree,
         trial_specs: "TaskTrialSpec",
         model: AbstractModel,
-    ) -> LossDict:
-        return LossDict({self.label: self.term(states, trial_specs, model)})
+    ) -> TermTree["AbstractLoss"]:
+        return TermTree.leaf(self.label, self.term(states, trial_specs, model), originator=self)
 
-    @abstractmethod
     def term(
         self,
         states: Optional[PyTree],
@@ -124,7 +180,10 @@ class AbstractLoss(Module):
         model: Optional[AbstractModel],
     ) -> Array:
         """Implement this to calculate a loss term."""
-        ...
+        raise NotImplementedError
+
+    def skeleton(self, batch_dims: tuple[int, ...]) -> TermTree:
+        return TermTree.leaf(self.label, jnp.empty(batch_dims))
 
     def __add__(self, other: "AbstractLoss") -> "CompositeLoss":
         return CompositeLoss(terms=(self, other), weights=(1.0, 1.0))
@@ -155,12 +214,96 @@ class AbstractLoss(Module):
         return self.__mul__(other)
 
 
-class CompositeLoss(AbstractLoss):
-    """Incorporates multiple simple loss terms and their relative weights."""
+class AbstractTermedLoss(AbstractLoss):
+    terms: AbstractVar[Mapping[str, Any]]
+    weights: AbstractVar[Mapping[str, float]]
 
+    def flatten_weights(
+        self,
+        *,
+        prefix: str = "",
+        apply_weights: bool = True,
+        parent_weight: float = 1.0,
+        include_self_label: bool = False,
+    ) -> dict[str, float]:
+        """
+        Return a flattened mapping { 'path/to/leaf': effective_weight }.
+
+        If apply_weights=True, each value includes the product of all weights
+        along the path from the root down to that leaf. Otherwise, only the
+        local (child) weights are returned.
+        """
+        base = prefix
+        if include_self_label:
+            base += self.label
+        out: dict[str, float] = {}
+        if base:
+            base += "/"
+
+        for name, subloss in self.terms.items():
+            local_w = self.weights.get(name, 1.0)
+            path_prefix = f"{base}{name}"
+
+            if isinstance(subloss, AbstractTermedLoss):
+                # Recurse into sub-composites
+                sub = subloss.flatten_weights(
+                    prefix=path_prefix,
+                    apply_weights=apply_weights,
+                    parent_weight=(parent_weight * local_w if apply_weights else 1.0),
+                )
+                out.update(sub)
+            else:
+                # Leaf: record effective weight
+                effective = parent_weight * local_w if apply_weights else local_w
+                out[path_prefix] = float(effective)
+
+        return out
+
+    def skeleton(self, batch_dims: tuple[int, ...]) -> TermTree:
+        children: dict[str, TermTree] = {}
+        for name, term in self.terms.items():
+            if isinstance(term, AbstractLoss):
+                child = term.skeleton(batch_dims)
+            else:
+                child = TermTree.leaf(name, jnp.empty(batch_dims))
+            child = child.with_weight(self.weights.get(name, 1.0))
+            children[name] = child
+        return TermTree.branch(self.label, children, originator=self)
+
+
+class FuncTermsLoss[T](AbstractTermedLoss):
+    """A leaf loss node with multiple weighted terms that depend on shared context."""
+
+    label: str
+    build_context: Callable[
+        [State, "TaskTrialSpec", AbstractModel], T
+    ]  # (states, trial_specs, model) -> Ctx
+    terms: Mapping[str, Callable[[T], Array]]
+    weights: Mapping[str, float]
+
+    @jax.named_scope("fbx.FuncTermsLoss")
+    def __call__(
+        self,
+        states: State,
+        trial_specs: "TaskTrialSpec",
+        model: AbstractModel,
+    ) -> TermTree[AbstractLoss]:
+        ctx = self.build_context(states, trial_specs, model)
+        children = {}
+        for name, fn in self.terms.items():
+            v = fn(ctx)
+            # v = v if v.shape == () else self.reduce(v)  # enforce scalar per component
+            leaf = TermTree.leaf(name, v).with_weight(self.weights.get(name, 1.0))
+            children[name] = leaf
+        return TermTree.branch(self.label, children, originator=self)
+
+
+class CompositeLoss(AbstractTermedLoss):
+    """A loss node that composes multiple loss nodes and their weights."""
+
+    label: str
     terms: dict[str, AbstractLoss]
     weights: dict[str, float]
-    label: str
 
     def __init__(
         self,
@@ -289,43 +432,35 @@ class CompositeLoss(AbstractLoss):
         states: State,
         trial_specs: "TaskTrialSpec",
         model: AbstractModel,
-    ) -> LossDict:
+    ) -> TermTree[AbstractLoss]:
         """Evaluate, weight, and return all component terms.
 
         Arguments:
             states: Trajectories of system states for a set of trials.
             trial_specs: Task specifications for the set of trials.
         """
-        # Evaluate all loss terms
-        losses = jt.map(
-            lambda loss: loss.term(states, trial_specs, model),
-            self.terms,
-            is_leaf=lambda x: isinstance(x, AbstractLoss),
+        children = {}
+        for name, loss in self.terms.items():
+            node = loss(states, trial_specs, model)
+            w = self.weights.get(name, 1.0)
+            children[name] = node.with_weight(w)
+        return TermTree.branch(self.label, children, originator=self)
+
+    def without(self, *keys: str, label: Optional[str] = None) -> "CompositeLoss":
+        """Return a new `CompositeLoss` without the specified terms."""
+        return CompositeLoss(
+            terms={k: v for k, v in self.terms.items() if k not in keys},
+            weights={k: v for k, v in self.weights.items() if k not in keys},
+            label=self.label if label is None else label,
         )
 
-        # aggregate over batch for state-based losses
-        losses = jt.map(
-            lambda x: jnp.mean(x, axis=0) if x.ndim > 0 else x,
-            losses,
-        )
-
-        if self.weights is not None:
-            # term scaling
-            losses = jt.map(
-                lambda term, weight: term * weight,
-                dict(losses),
-                self.weights,
-            )
-
-        return LossDict(losses)
-
-    def term(
-        self,
-        states: Optional[PyTree],
-        trial_specs: Optional["TaskTrialSpec"],
-        model: Optional[AbstractModel],
-    ) -> Array:
-        return self(states, trial_specs, model).total
+    # def skeleton(self, batch_dims: tuple[int, ...]) -> TermTree:
+    #     children: dict[str, TermTree] = {}
+    #     for name, loss in self.terms.items():
+    #         child = loss.skeleton(batch_dims)
+    #         child = child.with_weight(self.weights.get(name, 1.0))
+    #         children[name] = child
+    #     return TermTree.branch(self.label, children, originator=self)
 
 
 # Maybe rename TargetValueSpec; I feel like a "`TargetSpec`" would include a `where` field
@@ -334,9 +469,9 @@ class TargetSpec(Module):
 
     # `value` may be `None` when we specify default values for the other fields
     value: Optional[PyTree[Array]] = None
-    # TODO: If `time_idxs` is `Array`, it must be 1D or we'll lose the time dimension before we sum over it!
-    time_idxs: Optional[Array] = None
-    discount: Optional[Array] = None  # field(default_factory=lambda: jnp.array([1.0]))
+    time_idxs: Optional[Array | Callable] = None
+    time_mask: Optional[Array | Callable] = None
+    discount: Optional[Array | Callable] = None  # field(default_factory=lambda: jnp.array([1.0]))
 
     def __and__(self, other):
         # Allows user to do `target_zero & target_final_state`, for example.
@@ -346,17 +481,35 @@ class TargetSpec(Module):
         # Necessary for edge case of `None & spec`
         return eqx.combine(other, self)
 
+    def get_time_mask(self, n: int) -> Optional[Array | Callable]:
+        if self.time_idxs is None:
+            return None
+        mask = jnp.zeros((n,), dtype=bool)
+
+        if callable(self.time_idxs):
+
+            def mask_fn(trial_spec):
+                idxs = self.time_idxs(trial_spec)  # type: ignore
+                return mask.at[idxs].set(True)
+
+            return mask_fn
+
+        else:
+            mask = jnp.zeros((n,), dtype=bool)
+            mask = mask.at[self.time_idxs].set(True)
+            return mask
+
     @property
     def batch_axes(self) -> PyTree[None | int]:
         # Assume that only the target value will vary between trials.
         # TODO: (Low priority.) It's probably better to give control over this to
         # `AbstractTask`, since in some cases we might want to vary these parameters
         # over trials and not just across batches. And if we don't want to vary them
-        # at all, then why are time_idxs and discount not just fields of
+        # at all, then why are time_mask and discount not just fields of
         # `TargetStateLoss`?
         return TargetSpec(
             value=0,
-            time_idxs=None,
+            time_mask=None,
             discount=None,
         )
 
@@ -437,17 +590,137 @@ class TargetStateLoss(AbstractLoss):
         else:
             raise ValueError("Invalid target spec encountered ")
 
-        if target_spec.time_idxs is not None:
-            state = state[..., target_spec.time_idxs, :]
-
         loss_over_time = self.norm(state - target_spec.value)
 
-        # jax.debug.print("loss_over_time\n{a}\n\nstate\n{b}\n\n\n\n\n", a=loss_over_time, b=state)
+        # https://chatgpt.com/share/68ec227e-052c-8006-86ac-ffc5dc490b4d
 
-        if target_spec.discount is not None:
-            loss_over_time = loss_over_time * target_spec.discount
+        masks = [
+            x
+            for x in [
+                target_spec.get_time_mask(loss_over_time.shape[-1]),
+                target_spec.discount,
+            ]
+            if x is not None
+        ]
 
-        return jnp.sum(loss_over_time, axis=-1)
+        return reduce_over_time_with_weights(
+            arr=loss_over_time,
+            trial_specs=trial_specs,
+            time_axis=-1,
+            trial_axis=0,  #! Correct?
+            trial_axis_specs=0,  # in `trial_specs`
+            masks=masks,
+        )
+
+
+WeightsSpec = float | Array | Callable[[object], float | Array]
+# Callable takes a single trial's spec (PyTree leaf view) and returns scalar or (T,) weights
+
+
+def _move_trial_axis_pytree(pytree, trial_axis: int):
+    return jt.map(lambda x: jnp.moveaxis(x, trial_axis, 0), pytree)
+
+
+def _per_trial_weights(selector: WeightsSpec, specs_T0, T: int, dtype) -> Array:
+    """Return (N, T) float weights from scalar/(T,) array OR callable(spec_i)->scalar/(T,)."""
+    leaves = jt.leaves(specs_T0)
+    N = leaves[0].shape[0] if leaves else 1
+
+    def _as_T(wi):
+        wi = jnp.asarray(wi)
+        if wi.ndim == 0:
+            return jnp.full((T,), wi.astype(dtype), dtype=dtype)
+        if wi.shape == (T,):
+            return wi.astype(dtype)
+        raise ValueError(f"weight must be scalar or shape (T,), got {wi.shape}")
+
+    if not callable(selector):
+        w = _as_T(selector)
+        return jnp.broadcast_to(w, (N, T))
+
+    def one(spec_i):
+        return _as_T(selector(spec_i))
+
+    return jax.vmap(one)(specs_T0)  # (N, T)
+
+
+def _combine_weights(
+    selectors: Sequence[WeightsSpec],
+    specs_T0,
+    T: int,
+    dtype,
+) -> Array:
+    """Multiply an arbitrary number of weight specs into a single (N,T) weight array."""
+    if not selectors:
+        N = jtu.tree_leaves(specs_T0)[0].shape[0] if jtu.tree_leaves(specs_T0) else 1
+        return jnp.ones((N, T), dtype=dtype)
+    w = _per_trial_weights(selectors[0], specs_T0, T, dtype)
+    for s in selectors[1:]:
+        w = w * _per_trial_weights(s, specs_T0, T, dtype)
+    return w
+
+
+def _trial_time_perm(ndim: int, trial_axis: int, time_axis: int):
+    """
+    Permutation that moves TRIAL -> 0 and TIME -> -1 while preserving the
+    relative order of all other axes.
+    """
+    ta = trial_axis if trial_axis >= 0 else ndim + trial_axis
+    ti = time_axis if time_axis >= 0 else ndim + time_axis
+    others = [ax for ax in range(ndim) if ax not in (ta, ti)]
+    # Preserve original order of the non-(trial,time) axes
+    return [ta, *others, ti]
+
+
+def _inv_perm(perm):
+    inv = [0] * len(perm)
+    for i, p in enumerate(perm):
+        inv[p] = i
+    return inv
+
+
+def reduce_over_time_with_weights(
+    *,
+    arr: Array,  # shape: (..., T, F?) pre-norm
+    trial_specs,  # PyTree; each leaf has a trial axis
+    time_axis: int,  # where T lives in `arr`
+    trial_axis: int,  # where trial axis lives in `arr`
+    trial_axis_specs: int,  # where trial axis lives in `trial_specs` leaves
+    masks: Sequence[WeightsSpec],  # any number of scalar/(T,) or callable(spec_i)->scalar/(T,)
+) -> Array:
+    """
+    1) Transpose so: (trial, ..., time).
+    2) Build combined per-trial weights W (N, T) by multiplying all masks.
+    3) Weighted sum over time, restore trial axis, drop time axis.
+    """
+    # Put trial at 0 and time at -1 in one explicit transpose
+    perm = _trial_time_perm(arr.ndim, trial_axis, time_axis)
+    inv_perm = _inv_perm(perm)
+    arr_rt = jnp.transpose(arr, perm)  # (N, ..., T)
+    specs_T0 = _move_trial_axis_pytree(trial_specs, trial_axis_specs)
+
+    T = arr_rt.shape[-1]
+    dtype = arr_rt.dtype
+
+    # Flatten non-time dims (except N) so (N, T) weights broadcast cleanly
+    N = arr_rt.shape[0]
+    rest = arr_rt.shape[1:-1]
+    arr_flat = arr_rt.reshape((N, -1, T))  # (N, R, T)
+
+    # Combine all masks/discounts/etc. as multiplicative weights
+    W = _combine_weights(masks, specs_T0, T, dtype)  # (N, T)
+
+    # Weighted reduction over time
+    reduced_flat = (arr_flat * W[:, None, :]).sum(axis=-1)  # (N, R)
+    reduced = reduced_flat.reshape((N, *rest))  # (N, ...)
+
+    # Restore the trial axis to its original slot in the *output* (time removed)
+    # inv_perm maps (trial, others..., time) -> original. Drop the 'time' entry,
+    # then move axis 0 to where 'trial' originally lived.
+    inv_perm_wo_time = [p for i, p in enumerate(inv_perm) if i != (len(inv_perm) - 1)]
+    target_trial_axis = inv_perm_wo_time.index(0)
+    out = jnp.moveaxis(reduced, 0, target_trial_axis)
+    return out
 
 
 """Penalizes the effector's squared distance from the target position
@@ -467,11 +740,6 @@ effector_vel_loss = TargetStateLoss(
     norm=lambda *args, **kwargs: (jnp.linalg.norm(*args, axis=-1, **kwargs) ** 2),
     spec=target_final_state,
 )
-
-
-def softmin(values, tau):
-    m = jnp.min(values)
-    return -tau * jnp.log(jnp.sum(jnp.exp(-(values - m) / tau))) + m
 
 
 class StopAtGoalLoss(AbstractLoss):
@@ -503,6 +771,7 @@ class StopAtGoalLoss(AbstractLoss):
         model: Optional[AbstractModel],
     ) -> Array:
         assert states is not None, "StopAtGoalLoss requires states"
+        assert trial_specs is not None, "StopAtGoalLoss requires trial_specs"
         # assert trial_specs is not None, "StopAtGoalLoss requires trial_specs"
 
         pos = states.mechanics.effector.pos[:, 1:]
@@ -522,6 +791,8 @@ class StopAtGoalLoss(AbstractLoss):
             log_prod = jnp.sum(log1m_s)
             p_exist = 1.0 - jnp.exp(log_prod)
             return -jnp.log(p_exist + self.eps)
+        else:
+            raise ValueError("method must be 'softmin' or 'soft-or'")
 
 
 class ModelLoss(AbstractLoss):
@@ -538,42 +809,6 @@ class ModelLoss(AbstractLoss):
     ) -> Array:
         assert model is not None, "ModelLoss requires a model, but model is None"
         return self.loss_fn(model)
-
-
-class EffectorPositionLoss(AbstractLoss):
-    label: str = "effector_position"
-    discount_func: Callable[[int], Float[Array, "#time"]] = lambda n_steps: power_discount(
-        n_steps, discount_exp=6
-    )[None, :]
-
-    def term(
-        self,
-        states: Optional["SimpleFeedbackState"],
-        trial_specs: Optional["TaskTrialSpec"],
-        model: Optional[AbstractModel],
-    ) -> Array:
-        assert states is not None, "EffectorPositionLoss requires states"
-        assert trial_specs is not None, "EffectorPositionLoss requires trial_specs"
-
-        # Sum over X, Y, giving the squared Euclidean distance
-        loss = jnp.sum(
-            (states.mechanics.effector.pos[:, 1:] - trial_specs.target.pos) ** 2,
-            axis=-1,  # type: ignore
-        )
-
-        # temporal discount
-        if self.discount_func is not None:
-            loss = loss * self.discount(loss.shape[-1])
-
-        # sum over time
-        loss = jnp.sum(loss, axis=-1)
-
-        return loss
-
-    def discount(self, n_steps):
-        # Can't use a cache because of JIT.
-        # But we only need to run this once per training iteration...
-        return self.discount_func(n_steps)
 
 
 class EffectorStraightPathLoss(AbstractLoss):
@@ -621,171 +856,6 @@ class EffectorStraightPathLoss(AbstractLoss):
         return loss
 
 
-class EffectorFixationLoss(AbstractLoss):
-    """Penalizes the effector's squared distance from the fixation position.
-
-    !!! Info ""
-        Similar to `EffectorPositionLoss`, but only penalizes the position
-        error during the part of the trial where `trial_specs.inputs.hold`
-        is non-zero/`True`.
-
-    Attributes:
-        label: The label for the loss term.
-    """
-
-    label: str = "effector_fixation"
-
-    def term(
-        self,
-        states: Optional[PyTree],
-        trial_specs: Optional["TaskTrialSpec"],
-        model: Optional[AbstractModel],
-    ) -> Array:
-        assert states is not None, "EffectorFixationLoss requires states"
-        assert trial_specs is not None, "EffectorFixationLoss requires trial_specs"
-
-        loss = jnp.sum(
-            (states.mechanics.effector.pos[:, 1:] - trial_specs.target.pos) ** 2, axis=-1
-        )
-
-        loss = loss * jnp.squeeze(trial_specs.inputs.hold)  # type: ignore
-
-        # sum over time
-        loss = jnp.sum(loss, axis=-1)
-
-        return loss
-
-
-class EffectorVelocityLoss(AbstractLoss):
-    """Penalizes the squared difference in effector velocity relative to the target
-    velocity across the trial.
-
-    Attributes:
-        label: The label for the loss term.
-        discount_func: Returns a trajectory with which to weight (discount)
-            the loss values calculated for each time step of the trial.
-            Defaults to a power-law curve that puts most of the weight on
-            time steps near the end of the trial.
-    """
-
-    label: str = "effector_velocity"
-    discount_func: Callable[[int], Float[Array, "#time"]] = lambda n_steps: jnp.float32(1.0)
-
-    def term(
-        self,
-        states: Optional["SimpleFeedbackState"],
-        trial_specs: Optional["TaskTrialSpec"],
-        model: Optional[AbstractModel],
-    ) -> Array:
-        assert states is not None, "EffectorVelocityLoss requires states"
-        assert trial_specs is not None, "EffectorVelocityLoss requires trial_specs"
-
-        # Sum over X, Y, giving the squared Euclidean distance
-        loss = jnp.sum(
-            (states.mechanics.effector.vel[:, 1:] - trial_specs.target.vel) ** 2,
-            axis=-1,  # type: ignore
-        )
-
-        # temporal discount
-        if self.discount_func is not None:
-            loss = loss * self.discount(loss.shape[-1])
-
-        # sum over time
-        loss = jnp.sum(loss, axis=-1)
-
-        return loss
-
-    def discount(self, n_steps):
-        # Can't use a cache because of JIT.
-        # But we only need to run this once per training iteration...
-        return self.discount_func(n_steps)
-
-
-class EffectorFinalVelocityLoss(AbstractLoss):
-    """Penalizes the squared difference between the effector's final velocity
-    and the goal velocity (typically zero) on the final timestep.
-
-    Attributes:
-        label: The label for the loss term.
-    """
-
-    label: str = "effector_final_velocity"
-
-    def term(
-        self,
-        states: Optional["SimpleFeedbackState"],
-        trial_specs: Optional["TaskTrialSpec"],
-        model: Optional[AbstractModel],
-    ) -> Array:
-        assert states is not None, "EffectorFinalVelocityLoss requires states"
-        assert trial_specs is not None, "EffectorFinalVelocityLoss requires trial_specs"
-
-        loss = jnp.sum(
-            (states.mechanics.effector.vel[:, -1] - trial_specs.target.vel[:, -1]) ** 2,
-            axis=-1,
-        )
-
-        return loss
-
-
-class NetworkOutputLoss(AbstractLoss):
-    """Penalizes the squared values of the network's outputs.
-
-    Attributes:
-        label: The label for the loss term.
-    """
-
-    label: str = "nn_output"
-
-    def term(
-        self,
-        states: Optional["SimpleFeedbackState"],
-        trial_specs: Optional["TaskTrialSpec"],
-        model: Optional[AbstractModel],
-    ) -> Array:
-        assert states is not None, "NetworkOutputLoss requires states"
-        assert trial_specs is not None, "NetworkOutputLoss requires trial_specs"
-
-        assert states.net.output is not None, (
-            "Cannot calculate NetworkOutputLoss if network output is None"
-        )
-
-        # Sum over output channels
-        loss = jnp.sum(states.net.output**2, axis=-1)
-
-        # Sum over time
-        loss = jnp.sum(loss, axis=-1)
-
-        return loss
-
-
-class NetworkActivityLoss(AbstractLoss):
-    """Penalizes the squared values of the network's hidden activity.
-
-    Attributes:
-        label: The label for the loss term.
-    """
-
-    label: str = "nn_hidden"
-
-    def term(
-        self,
-        states: Optional["SimpleFeedbackState"],
-        trial_specs: Optional["TaskTrialSpec"],
-        model: Optional[AbstractModel],
-    ) -> Array:
-        assert states is not None, "NetworkActivityLoss requires states"
-        assert trial_specs is not None, "NetworkActivityLoss requires trial_specs"
-
-        # Sum over hidden units
-        loss = jnp.sum(states.net.hidden**2, axis=-1)
-
-        # sum over time
-        loss = jnp.sum(loss, axis=-1)
-
-        return loss
-
-
 def power_discount(n_steps: int, discount_exp: int = 6) -> Array:
     """A power-law vector that puts most of the weight on its later elements.
 
@@ -797,34 +867,3 @@ def power_discount(n_steps: int, discount_exp: int = 6) -> Array:
         return jnp.array(1.0)
     else:
         return jnp.linspace(1.0 / n_steps, 1.0, n_steps) ** discount_exp
-
-
-def mse(x, y):
-    """Mean squared error."""
-    return jt.map(
-        lambda x, y: jnp.mean((x - y) ** 2),
-        x,
-        y,
-    )
-
-
-def nan_safe_mse(
-    preds: Array,
-    targets: Array,
-) -> Array:
-    """
-    Calculates MSE safely for gradients when targets have NaN entries.
-
-    Assumes that if `pred` has NaN entries, then `target` will also have NaNs in the same rows.
-
-    Computes a mask of the NaN entries in `targets`, replaces NaNs with zeros,
-    proceeds with MSE calculation, then masks the NaN entries out of the result
-    prior to aggregation.
-    """
-    valid_mask = ~jnp.isnan(targets)
-    targets_cleaned = jnp.nan_to_num(targets, nan=0.0)
-    squared_errors = (preds - targets_cleaned) ** 2
-    masked_squared_errors = jnp.where(valid_mask, squared_errors, 0.0)
-    sum_of_squared_errors = jnp.sum(masked_squared_errors)
-    num_valid_elements = jnp.sum(valid_mask)
-    return sum_of_squared_errors / jnp.maximum(num_valid_elements, 1.0)

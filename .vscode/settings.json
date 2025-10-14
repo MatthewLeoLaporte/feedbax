@@ -34,13 +34,11 @@
     "explorer.autoReveal": false,
     "scm.autoReveal": false,
     "files.trimTrailingWhitespace": true,
-    "python.analysis.exclude": [
-        "archive"
+    "python-envs.pythonProjects": [
+        {
+            "path": "",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        }
     ],
-    "python.analysis.typeCheckingMode": "standard",
-    "python.analysis.include": [
-        "feedbax",
-        "tests",
-        "examples"
-    ]
 }

@@ -4,12 +4,12 @@
 :license: Apache 2.0. See LICENSE for details.
 """
 
+import logging
+import os
 from abc import abstractmethod, abstractproperty
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from functools import cached_property
-import logging
-import os
 from typing import (
     TYPE_CHECKING,
     Generic,
@@ -18,33 +18,33 @@ from typing import (
     Self,
     TypeAlias,
     TypeVar,
-    Union, dataclass_transform,
+    Union,
+    dataclass_transform,
 )
 
 import equinox as eqx
-from equinox import AbstractVar, Module, field
 import jax
 import jax.random as jr
 import jax.tree as jt
-from jaxtyping import Array, PRNGKeyArray, PyTree
 import numpy as np
+from equinox import AbstractVar, Module, field
+from jaxtyping import Array, PRNGKeyArray, PyTree
 
 from feedbax._model import AbstractModel, ModelInput
 from feedbax.intervene import AbstractIntervenor
 from feedbax.intervene.intervene import AbstractIntervenorInput
 from feedbax.intervene.schedule import (
-    ArgIntervenors, 
-    Intervenor, 
-    IntervenorLabelStr, 
-    ModelIntervenors, 
-    StageIntervenors, 
-    _fixed_intervenor_label, 
-    pre_first_stage,
+    ArgIntervenors,
+    Intervenor,
+    IntervenorLabelStr,
+    ModelIntervenors,
+    StageIntervenors,
+    _fixed_intervenor_label,
     post_final_stage,
+    pre_first_stage,
 )
 from feedbax.misc import indent_str, is_module
 from feedbax.state import StateT
-
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +52,18 @@ logger = logging.getLogger(__name__)
 ModelT = TypeVar("ModelT", bound=Module)
 T = TypeVar("T", bound=Module)
 
+
 class ModelStageCallable(Protocol):
     # This is part of the `ModelInput` hack.
-    def __call__(self, input_: ModelInput, state: PyTree[Array], *, key: PRNGKeyArray) -> PyTree[Array]:
-        ...
-        
+    def __call__(
+        self, input_: ModelInput, state: PyTree[Array], *, key: PRNGKeyArray
+    ) -> PyTree[Array]: ...
+
 
 class OtherStageCallable(Protocol):
-    def __call__(self, input_: PyTree[Array], state: PyTree[Array], *, key: PRNGKeyArray) -> PyTree[Array]:
-        ...
+    def __call__(
+        self, input_: PyTree[Array], state: PyTree[Array], *, key: PRNGKeyArray
+    ) -> PyTree[Array]: ...
 
 
 class ModelStage(Module, Generic[ModelT, T]):
@@ -151,7 +154,6 @@ class AbstractStagedModel(AbstractModel[StateT]):
                 each model stage and intervenor.
         """
         with jax.named_scope(type(self).__name__):
-
             # Intervenors may be scheduled prior to the first model stage.
             if pre_first_stage in self.intervenors:
                 state = self._apply_intervenors(
@@ -164,7 +166,6 @@ class AbstractStagedModel(AbstractModel[StateT]):
             keys = jr.split(key, len(self._stages))
 
             for (label, stage), key in zip(self._stages.items(), keys):
-
                 key_intervene, key_stage = jr.split(key)
 
                 callable_ = stage.callable(self)
@@ -212,7 +213,7 @@ class AbstractStagedModel(AbstractModel[StateT]):
                     )
 
                     logger.debug(f"\n{indent_str(log_str, indent=2)}\n")
-                    
+
             # Intervenors may also be explicitly scheduled for after the final model stage.
             if post_final_stage in self.intervenors:
                 state = self._apply_intervenors(
@@ -240,7 +241,19 @@ class AbstractStagedModel(AbstractModel[StateT]):
                 state = intervenor(None, state, key=k)
             else:
                 # Per-trial params provided by the task.
+                state_ = state
                 state = intervenor(params[label], state, key=k)
+                #! TMP
+                # if self.__class__.__name__ == "Mechanics":
+                #     jax.debug.print(
+                #         "init={a}, {c}\n post={b}\n scale={d}\n active={e}\n field={f}\n\n",
+                #         a=state_.effector.force,
+                #         c=state_.effector.vel,
+                #         b=state.effector.force,
+                #         d=params[label].scale,
+                #         e=params[label].active,
+                #         f=params[label].field,
+                #     )
         return state
 
     @abstractmethod
@@ -272,9 +285,7 @@ class AbstractStagedModel(AbstractModel[StateT]):
         return jt.map(
             lambda x, y: eqx.tree_at(lambda x: x.intervenors, x, y),
             self.model_spec,
-            OrderedDict({
-                k: self.intervenors.get(k, {}) for k in self.model_spec
-            }),
+            OrderedDict({k: self.intervenors.get(k, {}) for k in self.model_spec}),
             is_leaf=lambda x: isinstance(x, ModelStage),
         )
 
@@ -289,18 +300,22 @@ class AbstractStagedModel(AbstractModel[StateT]):
         if intervenors is not None:
             if isinstance(intervenors, Sequence):
                 # By default, place interventions before the first stage.
-                intervenors_dict |= {pre_first_stage:
-                    OrderedDict({
-                        _fixed_intervenor_label(intervenor): intervenor
-                        for intervenor in intervenors
-                    })
+                intervenors_dict |= {
+                    pre_first_stage: OrderedDict(
+                        {
+                            _fixed_intervenor_label(intervenor): intervenor
+                            for intervenor in intervenors
+                        }
+                    )
                 }
             elif isinstance(intervenors, Mapping):
                 intervenors_dict |= {
-                    stage_name: OrderedDict({
-                        _fixed_intervenor_label(intervenor): intervenor
-                        for intervenor in stage_intervenors
-                    })
+                    stage_name: OrderedDict(
+                        {
+                            _fixed_intervenor_label(intervenor): intervenor
+                            for intervenor in stage_intervenors
+                        }
+                    )
                     for stage_name, stage_intervenors in intervenors.items()
                 }
             else:
@@ -326,7 +341,8 @@ class AbstractStagedModel(AbstractModel[StateT]):
             self, is_leaf=lambda x: isinstance(x, AbstractIntervenor)
         )
         labels = [
-            path[-1].key for path, leaf in model_leaves_with_paths
+            path[-1].key
+            for path, leaf in model_leaves_with_paths
             if isinstance(leaf, AbstractIntervenor)
         ]
         return tuple(labels)
@@ -384,9 +400,7 @@ def pformat_model_spec(
             spec_strs += [intervenor_str + spec_str]
 
             if isinstance(callable, AbstractStagedModel):
-                spec_strs += [
-                    " " * indent + spec_str for spec_str in get_spec_strs(callable)
-                ]
+                spec_strs += [" " * indent + spec_str for spec_str in get_spec_strs(callable)]
 
         return spec_strs
 

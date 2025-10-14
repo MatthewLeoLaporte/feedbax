@@ -38,7 +38,7 @@ import jax.tree_util as jtu
 import numpy as np
 import plotly.graph_objs as go  # pyright: ignore [reportMissingTypeStubs]
 from equinox import AbstractVar, Module, field
-from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree, Shaped
+from jaxtyping import Array, ArrayLike, Float, Int, PRNGKeyArray, PyTree, Shaped
 
 import feedbax.plot.trajectories as plot
 from feedbax._mapping import WhereDict
@@ -57,8 +57,8 @@ from feedbax.intervene.remove import remove_all_intervenors
 from feedbax.intervene.schedule import IntervenorLabelStr
 from feedbax.loss import (
     AbstractLoss,
-    LossDict,
     TargetSpec,
+    TermTree,
     power_discount,
 )
 from feedbax.misc import BatchInfo, is_module, is_none
@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 N_DIM = 2
 
 
-def _validate_jittable(n_steps: int, eb: jnp.ndarray | None, es: jnp.ndarray | None):
+def _validate_jittable(n_steps: int, eb: Array | None, es: Array | None):
     """Safe under jit/vmap; supports eb ∈ {(E+1,), (B, E+1)} and es ∈ {(M,), (B, M)}."""
 
     if eb is not None:
@@ -82,11 +82,13 @@ def _validate_jittable(n_steps: int, eb: jnp.ndarray | None, es: jnp.ndarray | N
         eb = eqx.error_if(eb, ~jnp.all(nondec_per), "epoch_bounds must be nondecreasing")
 
         # First == 0 (if you enforce this)
-        first_ok = eb[..., 0] == 0
+        # (Type checker error for `eb` presumably because the return type of `error_if` is
+        # `PyTree`.)
+        first_ok = eb[..., 0] == 0  # type: ignore
         eb = eqx.error_if(eb, ~jnp.all(first_ok), "recommend epoch_bounds[0] == 0")
 
         # Last ≤ n_steps
-        last_ok = eb[..., -1] <= n_steps
+        last_ok = eb[..., -1] <= n_steps  # type: ignore
         eb = eqx.error_if(eb, ~jnp.all(last_ok), "epoch_bounds[-1] must be ≤ n_steps")
 
     if es is not None:
@@ -105,13 +107,13 @@ class TrialTimeline(Module):
       - event_steps are in [0, n_steps)
     """
 
-    n_steps: int
+    n_steps: Optional[int] = eqx.field(default=None, static=True)
 
     # Epoch partition
-    epoch_bounds: Optional[jnp.ndarray] = None  # shape (E+1,), int
+    epoch_bounds: Optional[Array] = None  # shape (E+1,), int
     epoch_names: Tuple[str, ...] = eqx.field(default_factory=tuple, static=True)
     # Point events
-    event_steps: Optional[jnp.ndarray] = None  # shape (M,), int
+    event_steps: Optional[Array] = None  # shape (M,), int
     event_names: Tuple[str, ...] = eqx.field(default_factory=tuple, static=True)
 
     # Fast name→index maps (static, not in the PyTree)
@@ -151,7 +153,7 @@ class TrialTimeline(Module):
     def has_epochs(self) -> bool:
         return self.epoch_bounds is not None and len(self.epoch_names) > 0
 
-    def epoch_idx_at(self, t: int) -> int:
+    def epoch_idx_at(self, t: int) -> ArrayLike:
         """Return epoch index k such that bounds[k] ≤ t < bounds[k+1], or -1 if unknown."""
         if self.epoch_bounds is None:
             return -1
@@ -172,7 +174,7 @@ class TrialTimeline(Module):
         e = jax.lax.dynamic_index_in_dim(eb, k + jnp.int32(1), keepdims=False)
         return s, e
 
-    def epoch_mask_by_idx(self, k: int) -> jnp.ndarray:
+    def epoch_mask_by_idx(self, k: int) -> Array:
         """Boolean mask of timesteps in epoch k."""
         s, e = self.epoch_bounds_by_idx(k)
         return (jnp.arange(self.n_steps) >= s) & (jnp.arange(self.n_steps) < e)
@@ -183,7 +185,7 @@ class TrialTimeline(Module):
     def epoch_bounds_by_name(self, name: str) -> tuple[int, int]:
         return self.epoch_bounds_by_idx(self.epoch_idx(name))
 
-    def epoch_mask(self, name: str) -> jnp.ndarray:
+    def epoch_mask(self, name: str) -> Array:
         return self.epoch_mask_by_idx(self.epoch_idx(name))
 
     def event_time(self, name: str) -> int:
@@ -227,8 +229,8 @@ class TrialTimeline(Module):
         # Mark only array leaves with axis 0; everything else None
         return TrialTimeline(
             n_steps=None,
-            epoch_bounds=0 if self.epoch_bounds is not None else None,
-            event_steps=0 if self.event_steps is not None else None,
+            epoch_bounds=jnp.array(0) if self.epoch_bounds is not None else None,
+            event_steps=jnp.array(0) if self.event_steps is not None else None,
             # the rest are static..
             epoch_names=self.epoch_names,
             event_names=self.event_names,
@@ -265,7 +267,7 @@ class TaskTrialSpec(Module):
     inputs: PyTree
     # target: AbstractVar[PyTree[Array]]
     intervene: Mapping[IntervenorLabelStr, AbstractIntervenorInput] = field(default_factory=dict)
-    timeline: Optional[TrialTimeline] = None
+    timeline: TrialTimeline = field(default_factory=TrialTimeline)
     extra: Optional[Mapping[str, Array]] = None
 
     @property
@@ -279,7 +281,7 @@ class TaskTrialSpec(Module):
             ),
             inputs=0,
             intervene=0,
-            timeline=self.timeline.batch_axes if self.timeline is not None else None,
+            timeline=self.timeline.batch_axes,
             extra=0,
         )
 
@@ -532,7 +534,7 @@ class AbstractTask(Module):
         model: "AbstractModel[StateT]",
         trial_specs: TaskTrialSpec,
         keys: PRNGKeyArray,
-    ) -> Tuple[StateT, LossDict]:
+    ) -> Tuple[StateT, TermTree]:
         """Evaluate a model on a set of trials, returning states and losses.
 
         Arguments:
@@ -580,7 +582,7 @@ class AbstractTask(Module):
         self,
         model: "AbstractModel[StateT]",
         key: PRNGKeyArray,
-    ) -> Tuple[StateT, LossDict]:
+    ) -> Tuple[StateT, TermTree]:
         """Evaluate a model on the task's validation set of trials.
 
         Arguments:
@@ -616,12 +618,12 @@ class AbstractTask(Module):
     @eqx.filter_jit
     def _eval_ensemble(
         self,
-        eval_fn: Callable,
+        eval_fn: Callable[..., T],
         models: "AbstractModel[StateT]",
         n_replicates: int,
         key: PRNGKeyArray,
         ensemble_random_trials: bool = True,
-    ) -> tuple[StateT, LossDict]:
+    ) -> T:
         models_arrays, models_other = eqx.partition(
             models,
             eqx.is_array,
@@ -650,7 +652,7 @@ class AbstractTask(Module):
         n_replicates: int,
         key: PRNGKeyArray,
         ensemble_random_trials: bool = True,
-    ) -> tuple[StateT, LossDict]:
+    ) -> tuple[StateT, TermTree]:
         """Return states and losses for an ensemble of models evaluated on the tasks's set of
         validation trials.
 
@@ -702,7 +704,7 @@ class AbstractTask(Module):
         model: "AbstractModel[StateT]",
         batch_info: BatchInfo,
         key: PRNGKeyArray,
-    ) -> Tuple[StateT, LossDict, TaskTrialSpec]:
+    ) -> Tuple[StateT, TermTree, TaskTrialSpec]:
         """Evaluate a model on a single batch of training trials.
 
         Arguments:
@@ -738,7 +740,7 @@ class AbstractTask(Module):
         batch_info: BatchInfo,
         key: PRNGKeyArray,
         ensemble_random_trials: bool = True,
-    ) -> Tuple[StateT, LossDict, TaskTrialSpec]:
+    ) -> Tuple[StateT, TermTree[AbstractLoss], TaskTrialSpec]:
         """Evaluate an ensemble of models on a single training batch.
 
         Arguments:
@@ -1171,7 +1173,7 @@ class DelayedReaches(AbstractTask):
     seed_validation: int = 5555
     intervention_specs: TaskInterventionSpecs = TaskInterventionSpecs()
     input_dependencies: dict[str, TrialSpecDependency] = field(default_factory=dict)
-    epoch_len_ranges: Sequence[Tuple[int, int], ...] = field(
+    epoch_len_ranges: Sequence[Tuple[int, int]] = field(
         default=(
             (5, 15),  # pre-target on
             (10, 20),  # target on ("stim")
@@ -1493,7 +1495,7 @@ def centreout_endpoints(
 
 def gen_epoch_lengths(
     key: PRNGKeyArray,
-    ranges: Tuple[Tuple[int, int], ...] = (
+    ranges: Sequence[Tuple[int, int]] = (
         (1, 3),  # (min, max) for first epoch
         (2, 5),  # second epoch
         (1, 3),

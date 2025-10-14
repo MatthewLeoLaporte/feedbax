@@ -8,6 +8,7 @@ import logging
 from collections import OrderedDict
 from collections.abc import Sequence
 from typing import (
+    TYPE_CHECKING,
     Literal,
     Optional,
     TypeVar,
@@ -24,7 +25,7 @@ from jaxtyping import Array, Float, PRNGKeyArray
 # pyright: reportMissingTypeStubs=false
 from plotly.colors import convert_colors_to_same_type
 
-from feedbax.loss import LossDict
+from feedbax.loss import AbstractLoss, TermTree
 from feedbax.plot.colors import DEFAULT_COLORS, color_add_alpha
 from feedbax.plot.misc import columns_mean_std, errorbars
 
@@ -35,7 +36,7 @@ T = TypeVar("T")
 
 
 def loss_history(
-    losses: LossDict,
+    losses: TermTree | Array,
     loss_context: Literal["training", "validation"] = "training",
     colors: Optional[list[str]] = None,
     error_bars_alpha: float = 0.3,
@@ -63,7 +64,7 @@ def loss_history(
     else:
         raise ValueError(f"{loss_context} is not a valid loss context")
 
-    losses: LossDict | Array = jt.map(
+    losses = jt.map(
         lambda x: np.array(x),
         losses,
     )

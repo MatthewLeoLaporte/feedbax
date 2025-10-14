@@ -12,12 +12,6 @@ import jax.numpy as jnp
 
 from feedbax.loss import (
     CompositeLoss,
-    EffectorFinalVelocityLoss,
-    EffectorFixationLoss,
-    EffectorPositionLoss,
-    EffectorVelocityLoss,
-    NetworkActivityLoss,
-    NetworkOutputLoss,
     TargetSpec,
     TargetStateLoss,
     power_discount,

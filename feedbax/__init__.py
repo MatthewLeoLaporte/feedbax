@@ -9,8 +9,7 @@ import logging.handlers as loghandlers
 import os
 import warnings
 
-
-from feedbax._io import save, load, load_with_hyperparameters
+from feedbax._io import load, load_with_hyperparameters, save
 from feedbax._model import (
     AbstractModel,
     ModelInput,
@@ -25,12 +24,12 @@ from feedbax._staged import (
 )
 from feedbax._tree import (
     get_ensemble,
-    random_split_like_tree,
     is_type,
     leaves_of_type,
     make_named_dict_subclass,
     make_named_tuple_subclass,
     move_level_to_outside,
+    random_split_like_tree,
     tree_array_bytes,
     tree_call,
     tree_concatenate,
@@ -52,8 +51,9 @@ from feedbax._tree import (
     tree_zip,
 )
 from feedbax.intervene import is_intervenor
-from feedbax.loss import is_lossdict
+from feedbax.loss import is_termtree
 from feedbax.misc import is_module
+
 # from feedbax._logging import enable_central_logging
 
 
@@ -72,4 +72,3 @@ LOG_LEVEL = os.environ.get("FEEDBAX_LOG_LEVEL", DEFAULT_LOG_LEVEL).upper()
 
 logger = logging.getLogger(__package__)
 logger.addHandler(logging.NullHandler())
-

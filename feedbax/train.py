@@ -19,6 +19,7 @@ import jax.tree_util as jtu
 import numpy as np
 import optax  # type: ignore
 from equinox import field
+from jax_cookbook.misc import mse
 from jax_cookbook.progress import piter, progress_piter
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
 from tensorboardX import SummaryWriter  # type: ignore
@@ -32,7 +33,7 @@ from feedbax._tree import (
     tree_take,
 )
 from feedbax.intervene import AbstractIntervenor
-from feedbax.loss import AbstractLoss, CompositeLoss, LossDict
+from feedbax.loss import AbstractLoss, CompositeLoss, TermTree
 from feedbax.misc import (
     BatchInfo,
     Timer,
@@ -66,8 +67,8 @@ class TaskTrainerHistory(eqx.Module):
         trial_specs: The training trial specifications.
     """
 
-    loss: LossDict | Array
-    loss_validation: LossDict | Array
+    loss: TermTree[AbstractLoss] | Array
+    loss_validation: TermTree[AbstractLoss] | Array
     learning_rate: Optional[Array] = None
     model_parameters: Optional[AbstractModel] = None
     trial_specs: dict[int, TaskTrialSpec] = field(default_factory=dict)
@@ -604,7 +605,7 @@ class TaskTrainer(eqx.Module):
                     self.writer.add_scalar(
                         f"loss/{ensembled_str}train", losses_mean.total.item(), batch
                     )
-                    for loss_term_label, loss_term in losses_mean.items():
+                    for loss_term_label, loss_term in losses_mean.flatten().items():
                         self.writer.add_scalar(
                             f"loss/{ensembled_str}train/{loss_term_label}",
                             loss_term.item(),
@@ -673,7 +674,7 @@ class TaskTrainer(eqx.Module):
                         for (
                             loss_term_label,
                             loss_term,
-                        ) in losses_validation_mean.items():
+                        ) in losses_validation_mean.flatten().items():
                             self.writer.add_scalar(
                                 f"loss/{ensembled_str}validation/{loss_term_label}",
                                 loss_term.item(),
@@ -729,7 +730,7 @@ class TaskTrainer(eqx.Module):
         `losses.total`, which is discarded because `losses` is itself returned
         as the auxiliary of `loss_func_wrapped`. This is necessary because
         the gradient is computed with respect to the primary output, but we
-        only need to store the original `LossDict` containing all loss terms.
+        only need to store the original `TermTree` containing all loss terms.
 
         The wrapping calls to `tree_unflatten` and `tree_leaves`, and passing
         of flattened versions of `model` and `opt_state`, bring slight
@@ -867,26 +868,26 @@ def init_task_trainer_history(
     else:
         batch_dims = (n_batches - start_batch,)
 
-    def _empty_loss_history(loss_func):
-        if isinstance(loss_func, CompositeLoss):
-            loss_keys = loss_func.weights.keys()
-            n_terms = len(loss_keys)
-            loss_arrays = [jnp.empty(batch_dims) for _ in range(n_terms)]
-            return LossDict(zip(loss_keys, loss_arrays))
-        else:
-            return jnp.empty(batch_dims)
+    # def _empty_loss_history(loss_func):
+    #     if isinstance(loss_func, CompositeLoss):
+    #         loss_keys = loss_func.weights.keys()
+    #         n_terms = len(loss_keys)
+    #         loss_arrays = [jnp.empty(batch_dims) for _ in range(n_terms)]
+    #         return TermTree(zip(loss_keys, loss_arrays))
+    #     else:
+    #         return jnp.empty(batch_dims)
 
-    loss_history = _empty_loss_history(loss_func)
+    loss_history = loss_func.skeleton(batch_dims)
 
     # Give precedence to the task's loss function, for the validation loss PyTree
     # (In order to exclude model-specific loss terms that `AbstractTask` should not know about
     # during validation)
     if loss_func_validation is not None:
-        loss_history_validation = _empty_loss_history(loss_func_validation)
+        loss_history_validation = loss_func_validation.skeleton(batch_dims)
     elif task is not None:
-        loss_history_validation = _empty_loss_history(task.loss_func)
+        loss_history_validation = task.loss_func.skeleton(batch_dims)
     else:
-        loss_history_validation = _empty_loss_history(loss_func)
+        loss_history_validation = loss_func.skeleton(batch_dims)
 
     if save_trial_specs is not None:
         assert task is not None
@@ -977,7 +978,7 @@ def grad_wrap_simple_loss_func(
         model,
         X,
         y,
-    ) -> Tuple[float, LossDict]:
+    ) -> Tuple[float, TermTree[AbstractLoss]]:
         return loss_func(_forward_pass(model, X), y)
 
     return wrapper
@@ -992,7 +993,7 @@ class SimpleTrainer(eqx.Module):
     """
 
     loss_func: Callable[[eqx.Module, Array, Array], Float] = field(
-        default=grad_wrap_simple_loss_func(loss.mse),
+        default=grad_wrap_simple_loss_func(mse),
     )
     optimizer: optax.GradientTransformation = field(
         default=optax.sgd(1e-2),
@@ -1052,7 +1053,7 @@ def grad_wrap_abstract_loss(loss_func: AbstractLoss):
         trial_specs: TaskTrialSpec,
         init_states: StateT,  #! has a batch dimension
         keys: PRNGKeyArray,  # per trial
-    ) -> Tuple[Array, Tuple[LossDict, StateT]]:
+    ) -> Tuple[Array, Tuple[TermTree[AbstractLoss], StateT]]:
         model = eqx.combine(diff_model, static_model)
 
         # ? will `in_axes` ever change?
