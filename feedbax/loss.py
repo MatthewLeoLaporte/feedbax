@@ -24,9 +24,12 @@ TODO:
 #! Can't do this because `AbstractVar` annotations can't be stringified.
 # from __future__ import annotations
 
+import functools as ft
+import inspect
 import logging
 from abc import abstractmethod
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from functools import cached_property, partial
 from typing import (
     TYPE_CHECKING,
@@ -62,23 +65,58 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-#! TODO: Could make Generic over associated node type; e.g. `TermTree[AbstractLoss]` where each
-#! tree node keeps a reference to the `AbstractLoss` term that generated it?
-class TermTree[T](eqx.Module, Mapping[str, "TermTree"]):
+U = TypeVar("U")
+
+
+@jtu.register_pytree_node_class
+@dataclass
+class TermTree[T](Mapping[str, "TermTree"]):
     label: str
     names: Tuple[str, ...]
     children: Tuple[Self, ...] = ()
     value: Optional[Array] = None  # only for leaf
     weight: float = 1.0
     leaf_fn: Callable[[Array], Array] = jnp.mean
-    originator: Optional[T] = field(default=None, static=True)
+    originator: Optional[T] = None
+
+    def tree_flatten(self):
+        """Flatten for PyTree; only include numeric/JAX parts dynamically."""
+        # dynamic leaves (these are mapped by vmap/jit):
+        children = (self.children, self.value)
+        # static metadata (these are carried in aux data, not mapped):
+        aux = (self.label, self.names, self.weight, self.leaf_fn, self.originator)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        label, names, weight, leaf_fn, originator = aux_data
+        kids, value = children
+        return cls(
+            label=label,
+            names=names,
+            children=kids,
+            value=value,
+            weight=weight,
+            leaf_fn=leaf_fn,
+            originator=originator,
+        )
 
     @staticmethod
     def leaf(
-        label: str, value: Array, *, weight: float = 1.0, originator: Optional[T] = None
+        label: str,
+        value: Array,
+        *,
+        weight: float = 1.0,
+        leaf_fn: Callable[[Array], Array] = jnp.mean,
+        originator: Optional[T] = None,
     ) -> "TermTree":
         return TermTree(
-            label=label, names=(), children=(), value=value, weight=weight, originator=originator
+            label=label,
+            names=(),
+            children=(),
+            value=value,
+            leaf_fn=leaf_fn,
+            weight=weight,  # originator=originator
         )
 
     @staticmethod
@@ -87,6 +125,7 @@ class TermTree[T](eqx.Module, Mapping[str, "TermTree"]):
         mapping: Mapping[str, "TermTree"],
         *,
         weight: float = 1.0,
+        leaf_fn: Callable[[Array], Array] = jnp.mean,
         originator: Optional[T] = None,  #! I don't think this should use the class generic T
     ) -> "TermTree":
         # Freeze order for JIT-stability
@@ -98,24 +137,72 @@ class TermTree[T](eqx.Module, Mapping[str, "TermTree"]):
             children=kids,
             value=None,
             weight=weight,
-            originator=originator,
+            leaf_fn=leaf_fn,
+            # originator=originator,
         )
 
-    def with_weight(self, w: float) -> Self:
-        # Scale just this node (composes multiplicatively through .total).
-        return eqx.tree_at(lambda t: t.weight, self, w)
+    def with_weight(self, weight: float) -> Self:
+        return TermTree(
+            label=self.label,
+            names=self.names,
+            children=self.children,
+            value=self.value,
+            leaf_fn=self.leaf_fn,
+            weight=weight,
+        )
+
+    def fold(
+        self,
+        *,
+        on_leaf: Callable[["TermTree"], U],
+        on_branch: Callable[["TermTree", Tuple[U, ...]], U],
+    ) -> U:
+        if self.value is not None:
+            return on_leaf(self)
+        child_vals = tuple(c.fold(on_leaf=on_leaf, on_branch=on_branch) for c in self.children)
+        return on_branch(self, child_vals)
+
+    def aggregate(
+        self,
+        *,
+        leaf_fn: Optional[
+            Callable[[Array], Array]
+        ] = None,  # uniform override; None → use node.leaf_fn
+        plus: Callable[[Array, Array], Array] = jnp.add,  # how to combine siblings
+        times: Callable[[Array, Array], Array] = jnp.multiply,  # how to apply weights
+        zero: Array | float = 0.0,  # identity for `plus`
+    ) -> Array:
+        # (a) how to evaluate a leaf:
+        def _on_leaf(node: "TermTree") -> Array:
+            f = node.leaf_fn if leaf_fn is None else leaf_fn
+            v = f(node.value)  # scalar (or broadcastable) is expected
+            return times(jnp.asarray(node.weight), v)
+
+        # (b) how to evaluate a branch:
+        def _on_branch(node: "TermTree", kids: Tuple[Array, ...]) -> Array:
+            acc = ft.reduce(plus, kids, jnp.asarray(zero))
+            return times(jnp.asarray(node.weight), acc)
+
+        return self.fold(on_leaf=_on_leaf, on_branch=_on_branch)
 
     @property
     def total(self) -> Array:
         """Return the node-weighted scalar sum of all leaves in this tree."""
+        return self.aggregate()
+
+    def map(self, fn: Callable[[Array], ArrayLike], check_value: Callable = eqx.is_array) -> Self:
+        """Apply a function to all `value` arrays in this `TermTree`.
+
+        Handle the recursion explicitly rather than using `jt.map` and excluding `weights` etc.
+        """
         if self.value is not None:
-            value = self.leaf_fn(self.value)
-            return self.weight * value
+            # Leaf node
+            new_value = fn(self.value) if check_value(self.value) else self.value
+            return eqx.tree_at(lambda t: t.value, self, new_value)
         else:
-            s = jnp.array(0.0)
-            for c in self.children:
-                s = s + c.total
-            return self.weight * s
+            # Branch node - recursively apply to children
+            new_children = tuple(child.map(fn) for child in self.children)
+            return eqx.tree_at(lambda t: t.children, self, new_children)
 
     def flatten(self, *, prefix: str = "", apply_weights: bool = True) -> Mapping[str, Array]:
         """
@@ -171,7 +258,11 @@ class AbstractLoss(Module):
         trial_specs: "TaskTrialSpec",
         model: AbstractModel,
     ) -> TermTree["AbstractLoss"]:
-        return TermTree.leaf(self.label, self.term(states, trial_specs, model), originator=self)
+        return TermTree.leaf(
+            self.label,
+            self.term(states, trial_specs, model),
+            originator=self,
+        )
 
     def term(
         self,
@@ -181,6 +272,38 @@ class AbstractLoss(Module):
     ) -> Array:
         """Implement this to calculate a loss term."""
         raise NotImplementedError
+
+    # TODO
+    # def __init_subclass__(cls, **kwargs):
+    #     """Enforce that subclasses implement exactly one of `term` (leaf nodes) or `__call__`."""
+    #     super().__init_subclass__(**kwargs)
+    #     if cls is AbstractLoss:
+    #         return  # don't check the root
+
+    #     base_call = AbstractLoss.__call__
+    #     base_term = AbstractLoss.term
+
+    #     # effective implementations after MRO resolution
+    #     call_impl = getattr(cls, "__call__", None)
+    #     term_impl = getattr(cls, "term", None)
+
+    #     call_overridden = call_impl is not base_call
+    #     term_overridden = term_impl is not base_term
+
+    #     # allow abstract intermediates that implement neither
+    #     if not call_overridden and not term_overridden:
+    #         #! Doesn't work, even if we subclass ABC; need to check if abstract `eqx.Module`
+    #         if not inspect.isabstract(cls):
+    #             raise TypeError(
+    #                 f"{cls.__name__} must override exactly one of '__call__' or 'term'."
+    #             )
+    #         return
+
+    #     # forbid overriding both
+    #     if call_overridden and term_overridden:
+    #         raise TypeError(
+    #             f"{cls.__name__} must override exactly one of '__call__' or 'term', not both."
+    #         )
 
     def skeleton(self, batch_dims: tuple[int, ...]) -> TermTree:
         return TermTree.leaf(self.label, jnp.empty(batch_dims))
@@ -594,16 +717,14 @@ class TargetStateLoss(AbstractLoss):
 
         # https://chatgpt.com/share/68ec227e-052c-8006-86ac-ffc5dc490b4d
 
-        masks = [
-            x
-            for x in [
-                target_spec.get_time_mask(loss_over_time.shape[-1]),
-                target_spec.discount,
-            ]
-            if x is not None
-        ]
+        time_mask = target_spec.time_mask
+        if time_mask is None:
+            time_mask = target_spec.get_time_mask(loss_over_time.shape[-1])
+
+        masks = [x for x in [time_mask, target_spec.discount] if x is not None]
 
         return reduce_over_time_with_weights(
+            label=self.label,
             arr=loss_over_time,
             trial_specs=trial_specs,
             time_axis=-1,
@@ -617,8 +738,13 @@ WeightsSpec = float | Array | Callable[[object], float | Array]
 # Callable takes a single trial's spec (PyTree leaf view) and returns scalar or (T,) weights
 
 
-def _move_trial_axis_pytree(pytree, trial_axis: int):
-    return jt.map(lambda x: jnp.moveaxis(x, trial_axis, 0), pytree)
+def _move_trial_axis_pytree(tree, trial_axis: int):
+    def _move(x):
+        if not isinstance(x, Array) or x.ndim < 2:
+            return x
+        return jnp.moveaxis(x, trial_axis, 0)
+
+    return jt.map(_move, tree)
 
 
 def _per_trial_weights(selector: WeightsSpec, specs_T0, T: int, dtype) -> Array:
@@ -641,7 +767,7 @@ def _per_trial_weights(selector: WeightsSpec, specs_T0, T: int, dtype) -> Array:
     def one(spec_i):
         return _as_T(selector(spec_i))
 
-    return jax.vmap(one)(specs_T0)  # (N, T)
+    return eqx.filter_vmap(one)(specs_T0)  # (N, T)
 
 
 def _combine_weights(
@@ -681,6 +807,7 @@ def _inv_perm(perm):
 
 def reduce_over_time_with_weights(
     *,
+    label: str,
     arr: Array,  # shape: (..., T, F?) pre-norm
     trial_specs,  # PyTree; each leaf has a trial axis
     time_axis: int,  # where T lives in `arr`
@@ -709,6 +836,8 @@ def reduce_over_time_with_weights(
 
     # Combine all masks/discounts/etc. as multiplicative weights
     W = _combine_weights(masks, specs_T0, T, dtype)  # (N, T)
+
+    jax.debug.print("{a}\n{b}\n\n", a=label, b=W)
 
     # Weighted reduction over time
     reduced_flat = (arr_flat * W[:, None, :]).sum(axis=-1)  # (N, R)

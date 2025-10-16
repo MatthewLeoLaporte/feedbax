@@ -107,7 +107,7 @@ class TrialTimeline(Module):
       - event_steps are in [0, n_steps)
     """
 
-    n_steps: Optional[int] = eqx.field(default=None, static=True)
+    n_steps: Optional[int] = eqx.field(default=None)
 
     # Epoch partition
     epoch_bounds: Optional[Array] = None  # shape (E+1,), int
@@ -229,8 +229,8 @@ class TrialTimeline(Module):
         # Mark only array leaves with axis 0; everything else None
         return TrialTimeline(
             n_steps=None,
-            epoch_bounds=jnp.array(0) if self.epoch_bounds is not None else None,
-            event_steps=jnp.array(0) if self.event_steps is not None else None,
+            epoch_bounds=0 if self.epoch_bounds is not None else None,
+            event_steps=0 if self.event_steps is not None else None,
             # the rest are static..
             epoch_names=self.epoch_names,
             event_names=self.event_names,

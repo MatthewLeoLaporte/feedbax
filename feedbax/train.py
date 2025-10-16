@@ -431,9 +431,9 @@ class TaskTrainer(eqx.Module):
             # evaluate = eqx.filter_vmap(
             #     task.eval_with_loss, in_axes=(model_array_spec, 0)
             # )
-            def evaluate(models, key):
+            def evaluate(model, key):
                 return task.eval_ensemble_with_loss(
-                    models,
+                    model,
                     n_replicates,
                     key,
                     ensemble_random_trials=ensemble_random_trials,
@@ -578,7 +578,11 @@ class TaskTrainer(eqx.Module):
                 history = eqx.tree_at(
                     lambda history: history.loss,
                     history,
-                    tree_set(history.loss, losses, batch - idx_start),
+                    tree_set(
+                        history.loss,
+                        losses.map(lambda arr: jnp.mean(arr, axis=-1)),  # agg over trials
+                        batch - idx_start,
+                    ),
                 )
 
                 if (hyperparams := getattr(opt_state, "hyperparams", None)) is not None:
@@ -593,7 +597,7 @@ class TaskTrainer(eqx.Module):
 
                 # tensorboard losses on every iteration
                 if ensembled:
-                    losses_mean = jt.map(lambda x: jnp.mean(x, axis=-1), losses)
+                    losses_mean = losses.map(jnp.mean)
                     # This will be appended to user-facing labels
                     # e.g. "mean training loss"
                     ensembled_str = "mean "
@@ -647,7 +651,13 @@ class TaskTrainer(eqx.Module):
                     history = eqx.tree_at(
                         lambda history: history.loss_validation,
                         history,
-                        tree_set(history.loss_validation, losses_validation, batch),
+                        tree_set(
+                            history.loss_validation,
+                            losses_validation.map(
+                                lambda arr: jnp.mean(arr, axis=-1)  # agg over trials
+                            ),
+                            batch,
+                        ),
                     )
 
                     if ensembled:
