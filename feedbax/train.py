@@ -22,6 +22,7 @@ from equinox import field
 from jax_cookbook.misc import mse
 from jax_cookbook.progress import piter, progress_piter
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
+from numpy._core.numeric import True_
 from tensorboardX import SummaryWriter  # type: ignore
 
 from feedbax import is_type, loss
@@ -173,6 +174,7 @@ class TaskTrainer(eqx.Module):
         disable_progress: bool = False,
         batch_callbacks: Optional[Mapping[int, Sequence[Callable]]] = None,
         run_label: Optional[str] = None,
+        verbose_progress: bool = True,
         *,
         key: PRNGKeyArray,
     ):
@@ -694,20 +696,31 @@ class TaskTrainer(eqx.Module):
                     # TODO: https://stackoverflow.com/a/69145493
 
                     if not disable_progress:
-                        #! TODO: This can probably fit on a single log line.
+                        # Header
                         if batch == n_batches - 1:
                             loss_str_head = f"Final training iteration ({batch}):"
                         else:
                             loss_str_head = f"Training iteration {batch}:"
-                        log_str = (
-                            loss_str_head
-                            + f"\n\t{ensembled_str}training loss: ".capitalize()
-                            + f"{losses_mean.total:{LOSS_FMT}}"
-                            + f"\n\t{ensembled_str}validation loss: ".capitalize()
-                            + f"{losses_validation_mean.total:{LOSS_FMT}}"
+
+                        # Base summary lines
+                        log_lines = [
+                            f"{loss_str_head}",
+                            f"\t{ensembled_str.capitalize()}training loss: {losses_mean.total:{LOSS_FMT}}",
+                        ]
+
+                        # Optional detailed breakdown
+                        if verbose_progress:
+                            flat_train = losses_mean.flatten()
+                            for k, v in flat_train.items():
+                                log_lines.append(f"\t\t{k}: {v:{LOSS_FMT}}")
+
+                        # Validation summary
+                        log_lines.append(
+                            f"\t{ensembled_str.capitalize()}validation loss: {losses_validation_mean.total:{LOSS_FMT}}"
                         )
-                        # if learning_rate is not None:
-                        #     log_str += f"\n\tlearning rate: {learning_rate:.4f}"
+
+                        # Combine and log
+                        log_str = "\n".join(log_lines)
                         logger.info(log_str)
 
         logger.info(

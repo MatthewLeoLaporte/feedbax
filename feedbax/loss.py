@@ -204,23 +204,56 @@ class TermTree[T](Mapping[str, "TermTree"]):
             new_children = tuple(child.map(fn) for child in self.children)
             return eqx.tree_at(lambda t: t.children, self, new_children)
 
-    def flatten(self, *, prefix: str = "", apply_weights: bool = True) -> Mapping[str, Array]:
+    def _walk_leaves(
+        self,
+        *,
+        include_root: bool,
+        apply_weights: bool,
+    ):
+        """Yield (path:str, node:TermTree, cum_w:float)."""
+
+        def visit(node: "TermTree", path_parts: list[str], cum_w: float):
+            if node.value is not None:
+                # leaf
+                path = "/".join(path_parts) if path_parts else node.label
+                yield path, node, (cum_w * node.weight if apply_weights else 1.0)
+                return
+
+            next_cum_w = cum_w * (node.weight if apply_weights else 1.0)
+            base_parts = [node.label] if include_root and not path_parts else path_parts
+            for name, child in zip(node.names, node.children):
+                yield from visit(child, base_parts + [name], next_cum_w)
+
+        yield from visit(self, [], 1.0)
+
+    def flatten(
+        self,
+        *,
+        apply_weights: bool = True,
+        apply_leaf_fn: bool = False,
+        include_root: bool = False,
+    ) -> dict[str, Array]:
         """
-        Returns { 'path/to/node': scalar } for leaves.
-        If apply_weights=True, each value is the fully-weighted contribution down the path.
+        Returns {'path/to/leaf': Array} for all leaves, WITHOUT applying `node.leaf_fn`.
+
+        If `apply_weights=True`, multiplies the raw leaf arrays by the cumulative
+        product of weights along the path (including the leaf's own `weight`).
         """
-        base = f"{prefix}{self.label}"
-        out = {}
-        if self.value is not None:
-            v = self.value
-            if apply_weights:
-                v = self.total  # already includes this node's weight
-            out[base] = v
-            return out
-        for name, child in zip(self.names, self.children):
-            sub = child.flatten(prefix=base + "/", apply_weights=apply_weights)
-            out.update(sub)
+        out: dict[str, Array] = {}
+        for path, node, w in self._walk_leaves(
+            include_root=include_root, apply_weights=apply_weights
+        ):
+            #! TODO: Make this `dict[str, Array | None]` and keep `None` leaves
+            arr = node.value if node.value is not None else jnp.asarray(0.0)
+            arr = self.leaf_fn(arr) if apply_leaf_fn else arr
+            out[path] = (w * arr) if apply_weights else arr
         return out
+
+    def iter_items(self, *, include_root: bool = False):
+        """Yield (path, leaf_node) for all leaves (no weights, no reduction)."""
+        for path, node, _ in self._walk_leaves(include_root=include_root, apply_weights=False):
+            if node.value is not None:
+                yield path, node
 
     def __len__(self):
         return len(self.children)
@@ -723,6 +756,7 @@ class TargetStateLoss(AbstractLoss):
 
         masks = [x for x in [time_mask, target_spec.discount] if x is not None]
 
+        # ? Should we keep the weights?
         return reduce_over_time_with_weights(
             label=self.label,
             arr=loss_over_time,
@@ -837,7 +871,8 @@ def reduce_over_time_with_weights(
     # Combine all masks/discounts/etc. as multiplicative weights
     W = _combine_weights(masks, specs_T0, T, dtype)  # (N, T)
 
-    jax.debug.print("{a}\n{b}\n\n", a=label, b=W)
+    # Print the indices of the first zero entry in each row (trial) of the weights
+    # jax.debug.print("{a}\n{b}\n\n", a=label, b=jnp.argmax(W == 0, axis=1))
 
     # Weighted reduction over time
     reduced_flat = (arr_flat * W[:, None, :]).sum(axis=-1)  # (N, R)

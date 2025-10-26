@@ -23,7 +23,7 @@ from feedbax._model import AbstractModel
 from feedbax.iterate import Iterator
 from feedbax.mechanics import Mechanics
 from feedbax.mechanics.skeleton.pointmass import PointMass
-from feedbax.nn import SimpleStagedNetwork
+from feedbax.nn import PopulationStructure, SimpleStagedNetwork
 from feedbax.noise import HalfNormal2Vector, Multiplicative, Normal
 from feedbax.task import AbstractTask
 
@@ -47,6 +47,7 @@ def point_mass_nn(
     motor_noise_std: float = 0.025,  # TODO
     tau_rise: float = 0.0,
     tau_decay: float = 0.0,
+    population_structure: Optional[PopulationStructure] = None,
     *,
     key: PRNGKeyArray,
 ):
@@ -90,9 +91,10 @@ def point_mass_nn(
     )
 
     # automatically determine network input size
-    input_size = SimpleFeedback.get_nn_input_size(
-        task, mechanics, feedback_spec=feedback_spec
-    ) + n_extra_inputs
+    input_size = (
+        SimpleFeedback.get_nn_input_size(task, mechanics, feedback_spec=feedback_spec)
+        + n_extra_inputs
+    )
 
     net = SimpleStagedNetwork(
         input_size,
@@ -101,6 +103,7 @@ def point_mass_nn(
         encoding_size=encoding_size,
         hidden_type=hidden_type,
         out_nonlinearity=out_nonlinearity,
+        population_structure=population_structure,
         key=key1,
     )
     body = SimpleFeedback(
@@ -110,8 +113,7 @@ def point_mass_nn(
         motor_noise_func=(
             # Combine signal-dependent noise with constant noise (e.g. Beer, Haggard, Wolpert 2004)
             # `broadcast=True` means only a single noise sample -- i.e. scale the vector, not the directions.
-            Multiplicative(Normal(std=motor_noise_std))
-            + Normal(std=1.8 * motor_noise_std)
+            Multiplicative(Normal(std=motor_noise_std)) + Normal(std=1.8 * motor_noise_std)
             # Multiplicative(
             #     HalfNormal2Vector(std=motor_noise_std),
             #     scale_func=lambda x: jnp.linalg.norm(x, axis=-1)

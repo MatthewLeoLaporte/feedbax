@@ -20,6 +20,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objs as go
 import polars as pl
+from jax_cookbook import identity
 from jaxtyping import Array, Float, PRNGKeyArray
 
 # pyright: reportMissingTypeStubs=false
@@ -64,18 +65,15 @@ def loss_history(
     else:
         raise ValueError(f"{loss_context} is not a valid loss context")
 
-    losses = jt.map(
-        lambda x: np.array(x),
-        losses,
-    )
+    losses = jt.map(np.array, losses)
 
-    losses_total = losses if isinstance(losses, Array) else losses.total
+    losses_total = losses if isinstance(losses, Array) else losses.aggregate(leaf_fn=identity)
 
-    timesteps = pl.DataFrame({"timestep": range(losses_total.shape[0])})
+    training_iterations = pl.DataFrame({"iteration": range(losses_total.shape[0])})
 
     dfs = jt.map(
-        lambda losses: pl.DataFrame(losses),
-        OrderedDict({"Total": losses_total}) | dict(losses),
+        lambda losses: pl.DataFrame(np.array(losses)),
+        OrderedDict({"Total": losses_total}) | losses.flatten(),
     )
 
     # TODO: Only apply this when yaxis is log scaled
@@ -93,7 +91,7 @@ def loss_history(
 
     # TODO: Only apply this when yaxis is log scaled
     loss_statistics, error_bars_bounds = jt.map(
-        lambda df: timesteps.hstack(
+        lambda df: training_iterations.hstack(
             df.select(
                 [
                     np.power(10, pl.col("*")),  # type: ignore
@@ -118,7 +116,7 @@ def loss_history(
         trace = go.Scatter(
             name=label,
             legendgroup=str(i),
-            x=loss_statistics[label]["timestep"],
+            x=loss_statistics[label]["iteration"],
             y=loss_statistics[label]["mean"],
             mode=scatter_mode,
             marker_size=3,
@@ -132,7 +130,7 @@ def loss_history(
             go.Scatter(
                 name="Upper bound",
                 legendgroup=str(i),
-                x=loss_statistics[label]["timestep"],
+                x=loss_statistics[label]["iteration"],
                 y=error_bars_bounds[label]["ub"],
                 line=dict(color="rgba(255,255,255,0)"),
                 hoverinfo="skip",
@@ -144,7 +142,7 @@ def loss_history(
             go.Scatter(
                 name="Lower bound",
                 legendgroup=str(i),
-                x=loss_statistics[label]["timestep"],
+                x=loss_statistics[label]["iteration"],
                 y=error_bars_bounds[label]["lb"],
                 line=dict(color="rgba(255,255,255,0)"),
                 fill="tonexty",
