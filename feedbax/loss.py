@@ -610,6 +610,25 @@ class CompositeLoss(AbstractTermedLoss):
             label=self.label if label is None else label,
         )
 
+    def with_weights(self, new_weights: dict[str, float]) -> "CompositeLoss":
+        """Return a new `CompositeLoss` with updated weights, preserving structure.
+
+        Arguments:
+            new_weights: Dictionary mapping term names to new weight values.
+                Only the weights for keys present in this dict will be updated;
+                other weights remain unchanged.
+
+        Returns:
+            A new `CompositeLoss` instance with the updated weights but the same
+            term structure. This operation does not trigger JIT recompilation
+            since the PyTree structure is preserved.
+        """
+        return eqx.tree_at(
+            lambda loss: loss.weights,
+            self,
+            new_weights
+        )
+
     # def skeleton(self, batch_dims: tuple[int, ...]) -> TermTree:
     #     children: dict[str, TermTree] = {}
     #     for name, loss in self.terms.items():

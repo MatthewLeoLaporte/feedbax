@@ -4,11 +4,11 @@
 :license: Apache 2.0, see LICENSE for details.
 """
 
+import logging
+import math
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from functools import cached_property
-import logging
-import math
 from typing import (
     Literal,
     Optional,
@@ -20,24 +20,23 @@ from typing import (
 )
 
 import equinox as eqx
-from equinox import Module, field
 import jax
-from jax.flatten_util import ravel_pytree
 import jax.numpy as jnp
 import jax.random as jr
+from equinox import Module, field
+from jax.flatten_util import ravel_pytree
 from jaxtyping import Array, Float, PRNGKeyArray, PyTree
 
-from feedbax.intervene import AbstractIntervenor
 from feedbax._model import wrap_stateless_callable, wrap_stateless_keyless_callable
+from feedbax._staged import AbstractStagedModel, ModelStage
+from feedbax.intervene import AbstractIntervenor
 from feedbax.intervene.schedule import ArgIntervenors, ModelIntervenors
 from feedbax.misc import (
     identity_func,
     interleave_unequal,
     n_positional_args,
 )
-from feedbax._staged import AbstractStagedModel, ModelStage
 from feedbax.state import StateT
-
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +92,7 @@ class NetworkState(Module):
         output: The activity of the readout layer, if the network has one.
         encoding: The activity of the encoding layer, if the network has one.
     """
+
     input: Float[Array, "inputs"]
     hidden: PyTree[Float[Array, "unit"]]
     output: Optional[PyTree[Array]] = None
@@ -160,6 +160,7 @@ class PopulationStructure(Module):
         recurrent_only_indices: Indices of recurrent-only units.
         input_readout_indices: Indices of input-readout units.
     """
+
     n_input_only: int
     n_readout_only: int
     n_recurrent_only: int
@@ -187,6 +188,13 @@ class PopulationStructure(Module):
     ) -> "PopulationStructure":
         """Create a population structure with the specified population sizes.
 
+        If the subpopulation sizes (e.g. `n_input_only`) sum up to less than
+        the `hidden_size`, then `n_input_readout` will be increased so the
+        overall sizes match. That means that calling this method with only
+        a `hidden_size` will create a network with no input-output segregation.
+        (Alternatively, in the future we could ask only for the subpopulation
+        structure and not for the total `hidden_size`, and just infer it.)
+
         Arguments:
             hidden_size: Total number of hidden units.
             n_input_only: Number of input-only units.
@@ -201,24 +209,29 @@ class PopulationStructure(Module):
             key: Random key for assignment.
         """
         total = n_input_only + n_readout_only + n_recurrent_only + n_input_readout
-        if total != hidden_size:
-            raise ValueError(
-                f"Population sizes must sum to hidden_size. Got {total} != {hidden_size}"
-            )
+        if total > hidden_size:
+            raise ValueError("Sum of subpopulation sizes is larger than network size")
+        elif total < hidden_size:
+            n_input_readout += hidden_size - total
 
         if assignment_fn is None:
             # Default: random assignment
             all_indices = jr.permutation(key, hidden_size)
             input_only_indices = all_indices[:n_input_only]
-            readout_only_indices = all_indices[n_input_only:n_input_only + n_readout_only]
+            readout_only_indices = all_indices[n_input_only : n_input_only + n_readout_only]
             recurrent_only_indices = all_indices[
-                n_input_only + n_readout_only:n_input_only + n_readout_only + n_recurrent_only
+                n_input_only + n_readout_only : n_input_only + n_readout_only + n_recurrent_only
             ]
-            input_readout_indices = all_indices[n_input_only + n_readout_only + n_recurrent_only:]
+            input_readout_indices = all_indices[n_input_only + n_readout_only + n_recurrent_only :]
         else:
             # Custom assignment
-            input_only_indices, readout_only_indices, recurrent_only_indices, input_readout_indices = (
-                assignment_fn(hidden_size, n_input_only, n_readout_only, n_recurrent_only, n_input_readout, key)
+            (
+                input_only_indices,
+                readout_only_indices,
+                recurrent_only_indices,
+                input_readout_indices,
+            ) = assignment_fn(
+                hidden_size, n_input_only, n_readout_only, n_recurrent_only, n_input_readout, key
             )
 
         # Compute combined indices for input and readout
@@ -249,6 +262,7 @@ class MaskedLinear(Module):
         linear: The underlying linear layer.
         mask: Binary mask applied to weights (1 = trainable, 0 = structural zero).
     """
+
     linear: eqx.nn.Linear
     mask: Array  # shape matches linear.weight
 
@@ -273,12 +287,15 @@ class MaskedLinear(Module):
         self.linear = eqx.nn.Linear(in_features, out_features, use_bias=use_bias, key=key)
         self.mask = mask
 
-        # Apply mask to initial weights
-        self.linear = eqx.tree_at(
-            lambda l: l.weight,
-            self.linear,
-            self.linear.weight * mask,
-        )
+    @property
+    def weight(self) -> Array:
+        """Access the underlying weight matrix for compatibility with eqx.nn.Linear interface."""
+        return self.linear.weight
+
+    @property
+    def bias(self) -> Optional[Array]:
+        """Access the underlying bias for compatibility with eqx.nn.Linear interface."""
+        return self.linear.bias
 
     def __call__(self, x: Array, *, key: Optional[PRNGKeyArray] = None) -> Array:
         """Apply the masked linear transformation.
@@ -418,7 +435,7 @@ class SimpleStagedNetwork(AbstractStagedModel[NetworkState]):
                 hidden = hidden_type(encoding_size, hidden_size, use_bias=use_bias, key=key1)
 
                 # Mask the input->hidden weights (weight_ih for GRU/RNN)
-                if hasattr(hidden, 'weight_ih'):
+                if hasattr(hidden, "weight_ih"):
                     # For GRUCell, weight_ih is (3*hidden_size, input_size) for reset, update, candidate
                     weight_ih_shape = hidden.weight_ih.shape
 
@@ -426,28 +443,30 @@ class SimpleStagedNetwork(AbstractStagedModel[NetworkState]):
                     if weight_ih_shape[0] == 3 * hidden_size:
                         # GRUCell case: replicate mask 3 times (for reset, update, candidate)
                         hidden_input_mask = jnp.zeros((hidden_size, encoding_size))
-                        hidden_input_mask = hidden_input_mask.at[population_structure.input_indices, :].set(1.0)
+                        hidden_input_mask = hidden_input_mask.at[
+                            population_structure.input_indices, :
+                        ].set(1.0)
                         hidden_input_mask = jnp.tile(hidden_input_mask, (3, 1))
                     else:
                         # Simple RNN case
                         hidden_input_mask = jnp.zeros((hidden_size, encoding_size))
-                        hidden_input_mask = hidden_input_mask.at[population_structure.input_indices, :].set(1.0)
+                        hidden_input_mask = hidden_input_mask.at[
+                            population_structure.input_indices, :
+                        ].set(1.0)
 
                     masked_weight_ih = hidden.weight_ih * hidden_input_mask
                     hidden = eqx.tree_at(lambda h: h.weight_ih, hidden, masked_weight_ih)
 
                 self.hidden = hidden
             else:
-                self.hidden = hidden_type(
-                    encoding_size, hidden_size, use_bias=use_bias, key=key1
-                )
+                self.hidden = hidden_type(encoding_size, hidden_size, use_bias=use_bias, key=key1)
         else:
             # No encoder - input goes directly to hidden layer
             if population_structure is not None:
                 hidden = hidden_type(input_size, hidden_size, use_bias=use_bias, key=key1)
 
                 # Mask the input->hidden weights
-                if hasattr(hidden, 'weight_ih'):
+                if hasattr(hidden, "weight_ih"):
                     # For GRUCell, weight_ih is (3*hidden_size, input_size) for reset, update, candidate
                     weight_ih_shape = hidden.weight_ih.shape
 
@@ -455,21 +474,23 @@ class SimpleStagedNetwork(AbstractStagedModel[NetworkState]):
                     if weight_ih_shape[0] == 3 * hidden_size:
                         # GRUCell case: replicate mask 3 times (for reset, update, candidate)
                         hidden_input_mask = jnp.zeros((hidden_size, input_size))
-                        hidden_input_mask = hidden_input_mask.at[population_structure.input_indices, :].set(1.0)
+                        hidden_input_mask = hidden_input_mask.at[
+                            population_structure.input_indices, :
+                        ].set(1.0)
                         hidden_input_mask = jnp.tile(hidden_input_mask, (3, 1))
                     else:
                         # Simple RNN case
                         hidden_input_mask = jnp.zeros((hidden_size, input_size))
-                        hidden_input_mask = hidden_input_mask.at[population_structure.input_indices, :].set(1.0)
+                        hidden_input_mask = hidden_input_mask.at[
+                            population_structure.input_indices, :
+                        ].set(1.0)
 
                     masked_weight_ih = hidden.weight_ih * hidden_input_mask
                     hidden = eqx.tree_at(lambda h: h.weight_ih, hidden, masked_weight_ih)
 
                 self.hidden = hidden
             else:
-                self.hidden = hidden_type(
-                    input_size, hidden_size, use_bias=use_bias, key=key1
-                )
+                self.hidden = hidden_type(input_size, hidden_size, use_bias=use_bias, key=key1)
 
         self.hidden_size = hidden_size
         self.hidden_nonlinearity = hidden_nonlinearity
@@ -481,15 +502,19 @@ class SimpleStagedNetwork(AbstractStagedModel[NetworkState]):
                 # Create mask for readout: only readout-contributing units have non-zero columns
                 readout_mask = jnp.zeros((out_size, hidden_size))
                 readout_mask = readout_mask.at[:, population_structure.readout_indices].set(1.0)
-                readout = MaskedLinear(hidden_size, out_size, readout_mask, use_bias=use_bias, key=key3)
+                readout = MaskedLinear(
+                    hidden_size, out_size, readout_mask, use_bias=use_bias, key=key3
+                )
             else:
                 readout = readout_type(hidden_size, out_size, key=key3)
 
             if (bias := getattr(readout, "bias", None)) is not None:
                 if isinstance(readout, MaskedLinear):
-                    readout.linear = eqx.tree_at(
-                        lambda layer: layer.bias,
-                        readout.linear,
+                    #! Is this necessary? Or can we just tree_at `layer.bias` since it is a property
+                    #! that points to `layer.linear.bias`?
+                    readout = eqx.tree_at(
+                        lambda layer: layer.linear.bias,
+                        readout,
                         jnp.zeros_like(bias),
                     )
                 else:
@@ -532,8 +557,7 @@ class SimpleStagedNetwork(AbstractStagedModel[NetworkState]):
             hidden_module = lambda self: wrap_stateless_callable(self.hidden)
             if isinstance(self.hidden, eqx.nn.Linear):
                 logger.warning(
-                    "Network hidden layer is linear but no hidden "
-                    "nonlinearity is defined"
+                    "Network hidden layer is linear but no hidden nonlinearity is defined"
                 )
         else:
             # #TODO: revert this!
@@ -544,14 +568,16 @@ class SimpleStagedNetwork(AbstractStagedModel[NetworkState]):
             # hidden_module = lambda self: tmp(self)
             hidden_module = lambda self: self.hidden
 
-        spec = OrderedDict({
-            # Store the flattened network inputs as part of `NetworkState`
-            "input": Stage(
-                callable=lambda self: lambda input, state, *, key: input,
-                where_input=lambda input, _: ravel_pytree(input)[0],
-                where_state=lambda state: state.input,
-            ),
-        })
+        spec = OrderedDict(
+            {
+                # Store the flattened network inputs as part of `NetworkState`
+                "input": Stage(
+                    callable=lambda self: lambda input, state, *, key: input,
+                    where_input=lambda input, _: ravel_pytree(input)[0],
+                    where_state=lambda state: state.input,
+                ),
+            }
+        )
 
         if self.encoder is None:
             spec |= OrderedDict(
@@ -564,25 +590,25 @@ class SimpleStagedNetwork(AbstractStagedModel[NetworkState]):
                 }
             )
         else:
-            spec = OrderedDict({
-                "encoder": Stage(
-                    callable=lambda self: lambda input, state, *, key: self.encoder(input),
-                    where_input=lambda input, state: state.input,
-                    where_state=lambda state: state.encoding,
-                ),
-                "hidden": Stage(
-                    callable=hidden_module,
-                    where_input=lambda input, state: state.encoding,
-                    where_state=lambda state: state.hidden,
-                ),
-            })
+            spec = OrderedDict(
+                {
+                    "encoder": Stage(
+                        callable=lambda self: lambda input, state, *, key: self.encoder(input),
+                        where_input=lambda input, state: state.input,
+                        where_state=lambda state: state.encoding,
+                    ),
+                    "hidden": Stage(
+                        callable=hidden_module,
+                        where_input=lambda input, state: state.encoding,
+                        where_state=lambda state: state.hidden,
+                    ),
+                }
+            )
 
         # TODO: conditional on `self.hidden_nonlinearity is not identity_func`?
         spec |= {
             "hidden_nonlinearity": Stage(
-                callable=lambda self: wrap_stateless_keyless_callable(
-                    self.hidden_nonlinearity
-                ),
+                callable=lambda self: wrap_stateless_keyless_callable(self.hidden_nonlinearity),
                 where_input=lambda input, state: state.hidden,
                 where_state=lambda state: state.hidden,
             ),
@@ -608,9 +634,7 @@ class SimpleStagedNetwork(AbstractStagedModel[NetworkState]):
 
         spec |= {
             "out_nonlinearity": Stage(
-                callable=lambda self: wrap_stateless_keyless_callable(
-                    self.out_nonlinearity
-                ),
+                callable=lambda self: wrap_stateless_keyless_callable(self.out_nonlinearity),
                 where_input=lambda input, state: state.output,
                 where_state=lambda state: state.output,
             )
@@ -737,10 +761,7 @@ class LeakyRNNCell(Module):
             noise = 0
 
         state = (1 - self.alpha) * state + self.alpha * self.nonlinearity(
-            jnp.dot(self.weight_ih, input)
-            + jnp.dot(self.weight_hh, state)
-            + bias
-            + noise
+            jnp.dot(self.weight_ih, input) + jnp.dot(self.weight_hh, state) + bias + noise
         )
 
         return state  #! 0D PyTree
@@ -773,9 +794,7 @@ def n_layer_linear(
         eqx.nn.Linear(size0, size1, use_bias=use_bias, key=keys[i])
         for i, (size0, size1) in enumerate(zip(sizes[:-1], sizes[1:]))
     ]
-    return eqx.nn.Sequential(
-        list(interleave_unequal(layers, [nonlinearity] * len(hidden_sizes)))
-    )
+    return eqx.nn.Sequential(list(interleave_unequal(layers, [nonlinearity] * len(hidden_sizes))))
 
 
 def two_layer_linear(
@@ -796,11 +815,14 @@ def two_layer_linear(
     )
 
 
-def gru_weight_idxs_func(label: Literal["candidate", "update", "reset"]) -> Callable[[Array], slice]:
+def gru_weight_idxs_func(
+    label: Literal["candidate", "update", "reset"],
+) -> Callable[[Array], slice]:
     """Returns a function that returns a slice of a subset of the GRU weights.
 
     TODO: Should probably just return a function that returns the subset of weights directly, rather than their indices.
     """
+
     def gru_weight_idxs(weights):
         len_by_3 = weights.shape[-2] // 3
         return {
@@ -808,4 +830,5 @@ def gru_weight_idxs_func(label: Literal["candidate", "update", "reset"]) -> Call
             "update": slice(len_by_3, 2 * len_by_3),
             "candidate": slice(2 * len_by_3, None),
         }[label]
+
     return gru_weight_idxs

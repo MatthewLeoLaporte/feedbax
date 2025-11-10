@@ -27,9 +27,17 @@ from feedbax.plot.misc import (
     unshare_axes,
 )
 from feedbax.types import SeqOf, SeqOfT
+from jax_cookbook import MaskedArray
 
 if TYPE_CHECKING:
     from feedbax.task import TaskTrialSpec
+
+
+def _unwrap_masked_array(x):
+    """Convert MaskedArray to regular array with masked values set to NaN."""
+    if isinstance(x, MaskedArray):
+        return np.asarray(x.unwrap())
+    return x
 
 
 def effector_trajectories(
@@ -408,7 +416,13 @@ def trajectories[T](
     - Distinct start/end endpoint markers for both 2D and 3D.
     - Optional mean trajectories per color group (works for 2D & 3D), with axis-exclusion control.
     - `axes_labels` and `scatter_kws` accept either single values or a Collection matching the number of leaves.
+
+    Supports MaskedArray leaves (duck-typed via .data/.mask attributes), which are
+    converted to NaN-masked arrays.
     """
+    # Unwrap any MaskedArray instances to NaN-masked regular arrays
+    subplots_data = jt.map(_unwrap_masked_array, subplots_data)
+
     default_start_marker_kws = dict(
         symbol=None,
         size=10,

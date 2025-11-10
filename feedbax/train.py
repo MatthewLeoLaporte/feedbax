@@ -175,6 +175,8 @@ class TaskTrainer(eqx.Module):
         batch_callbacks: Optional[Mapping[int, Sequence[Callable]]] = None,
         run_label: Optional[str] = None,
         verbose_progress: bool = True,
+        loss_update_func: Optional[Callable[[AbstractLoss, TermTree, PyTree], AbstractLoss]] = None,
+        loss_update_iterations: bool | Int[Array, "_"] = True,
         *,
         key: PRNGKeyArray,
     ):
@@ -242,6 +244,14 @@ class TaskTrainer(eqx.Module):
                 training step is performed for that batch. This can be used (say) for
                 profiling parts of the training run.
             run_label: For labeling the progress bar, if it is enabled.
+            loss_update_func: Function to update the loss function between iterations.
+                Called with the current loss function, computed losses (aggregated over
+                replicates if ensembled), and gradients (aggregated over replicates if
+                ensembled); returns updated loss function. Can update loss weights,
+                or any other aspect of the loss function structure.
+            loss_update_iterations: Whether/when to apply loss updates. If `True`,
+                update every iteration. If `False`, never update. If array of batch numbers,
+                update only on those iterations.
             key: The random key.
         """
         idx_end = idx_start + n_batches
@@ -380,6 +390,15 @@ class TaskTrainer(eqx.Module):
                 ]
             ).T
 
+        # Loss update mask
+        if loss_update_func is None:
+            loss_update_mask = np.full(idx_end, False, dtype=bool)
+        elif isinstance(loss_update_iterations, Array):
+            loss_update_mask = np.zeros(idx_end, dtype=bool)
+            loss_update_mask[loss_update_iterations] = True
+        else:
+            loss_update_mask = np.full(idx_end, loss_update_iterations, dtype=bool)
+
         # Passing the flattened pytrees through `_train_step` gives a slight
         # performance improvement. See the docstring of `_train_step`.
         flat_model, treedef_model = jtu.tree_flatten(
@@ -415,7 +434,7 @@ class TaskTrainer(eqx.Module):
                 None,
                 key_in_axis,
             )
-            out_axes = (0, trial_specs_out_axis, flat_model_arr_spec, 0)
+            out_axes = (0, trial_specs_out_axis, flat_model_arr_spec, 0, 0)
 
             train_step = eqx.filter_vmap(
                 self._train_step,
@@ -549,7 +568,7 @@ class TaskTrainer(eqx.Module):
                     current=batch,
                     total=idx_end,
                 )
-                (losses, trial_specs, flat_model, flat_opt_state) = train_step(
+                (losses, trial_specs, flat_model, flat_opt_state, grads) = train_step(
                     task,
                     loss_func,
                     batch_info,
@@ -596,6 +615,18 @@ class TaskTrainer(eqx.Module):
                             hyperparams["learning_rate"]
                         ),
                     )
+
+                # Update loss function if requested
+                if loss_update_mask[batch]:
+                    # Aggregate losses and gradients over replicates if ensembled
+                    if ensembled:
+                        losses_for_update = losses.map(lambda arr: jnp.mean(arr, axis=0))  # mean over replicates
+                        grads_for_update = jt.map(lambda arr: jnp.mean(arr, axis=0) if eqx.is_array(arr) else arr, grads)
+                    else:
+                        losses_for_update = losses
+                        grads_for_update = grads
+
+                    loss_func = loss_update_func(loss_func, losses_for_update, grads_for_update)
 
                 # tensorboard losses on every iteration
                 if ensembled:
@@ -816,7 +847,7 @@ class TaskTrainer(eqx.Module):
         flat_model = jtu.tree_leaves(model, is_leaf=lambda x: isinstance(x, AbstractIntervenor))
         flat_opt_state = jtu.tree_leaves(opt_state)
 
-        return losses, trial_specs, flat_model, flat_opt_state
+        return losses, trial_specs, flat_model, flat_opt_state, grads
 
     def _save_checkpoint(
         self,

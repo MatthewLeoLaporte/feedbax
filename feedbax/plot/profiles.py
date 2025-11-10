@@ -17,8 +17,16 @@ from feedbax.plot.colors import (
     color_add_alpha,
 )
 from feedbax.plot.misc import AggMode, _agg_circular, _agg_standard, _maybe_unwrap
+from jax_cookbook import MaskedArray
 
 T = TypeVar("T")
+
+
+def _unwrap_masked_array(x):
+    """Convert MaskedArray to regular array with masked values set to NaN."""
+    if isinstance(x, MaskedArray):
+        return np.asarray(x.unwrap())
+    return x
 
 
 def profiles(
@@ -47,7 +55,15 @@ def profiles(
 
     `agg_mode` selects aggregation per node: "standard" uses linear mean±std,
     "circular" uses circular mean and circular std-derived bands.
+
+    Supports MaskedArray leaves (duck-typed via .data/.mask attributes), which are
+    converted to NaN-masked arrays for aggregation.
     """
+    from jax_cookbook import MaskedArray, is_type
+
+    # Treat MaskedArray as a leaf throughout processing
+    is_leaf_ma = is_type(MaskedArray)
+
     if fig is None:
         fig = go.Figure()
 
@@ -58,16 +74,21 @@ def profiles(
         curves_kws = dict()
 
     if timesteps is None:
-        timesteps = jt.map(lambda x: np.arange(x.shape[-1]), vars_)
+        timesteps = jt.map(
+            lambda x: np.arange(x.data.shape[-1] if isinstance(x, MaskedArray) else x.shape[-1]),
+            vars_,
+            is_leaf=is_leaf_ma,
+        )
     else:
-        timesteps = tree_prefix_expand(timesteps, vars_)
+        timesteps = tree_prefix_expand(timesteps, vars_, is_leaf=is_leaf_ma)
 
     if labels is None:
-        labels = tree_labels(vars_)
+        labels = tree_labels(vars_, is_leaf=is_leaf_ma)
 
     batch_axes = jt.map(
-        lambda x: tuple(range(x.ndim - 1)),
+        lambda x: tuple(range((x.data if isinstance(x, MaskedArray) else x).ndim - 1)),
         vars_,
+        is_leaf=is_leaf_ma,
     )
     if keep_axis is None:
         mean_axes = batch_axes
@@ -75,34 +96,39 @@ def profiles(
         mean_axes = jt.map(
             lambda axes, axis: tuple(ax for ax in axes if ax != axis),
             batch_axes,
-            tree_prefix_expand(keep_axis, vars_),
+            tree_prefix_expand(keep_axis, vars_, is_leaf=is_leaf_ma),
             is_leaf=lambda x: isinstance(x, tuple) and eqx.is_array_like(x[0]),
         )
+
+    # Unwrap MaskedArray for aggregation
+    vars_unwrapped = jt.map(_unwrap_masked_array, vars_, is_leaf=is_leaf_ma)
 
     agg_fn = _agg_standard if agg_mode == "standard" else _agg_circular
     # Aggregate per node (return mean, upper, lower)
     means, ubs, lbs = jtree.unzip(
         jt.map(
             lambda x, axis: agg_fn(x, axis, n_std_plot),
-            vars_,
+            vars_unwrapped,
             mean_axes,
+            is_leaf=is_leaf_ma,
         )
     )
 
     means, ubs, lbs = jtree.unzip(
-        jt.map(lambda m, ub, lb: _maybe_unwrap(m, ub, lb, agg_mode), means, ubs, lbs)
+        jt.map(lambda m, ub, lb: _maybe_unwrap(m, ub, lb, agg_mode), means, ubs, lbs, is_leaf=is_leaf_ma)
     )
 
     if keep_axis is None:
-        means, ubs, lbs = jt.map(lambda arr: arr[None, ...], (means, ubs, lbs))
-        vars_flat = jt.map(lambda x: np.reshape(x, (1, -1, x.shape[-1])), vars_)
+        means, ubs, lbs = jt.map(lambda arr: arr[None, ...], (means, ubs, lbs), is_leaf=is_leaf_ma)
+        vars_flat = jt.map(lambda x: np.reshape(x, (1, -1, x.shape[-1])), vars_unwrapped, is_leaf=is_leaf_ma)
     else:
         vars_flat = jt.map(
             lambda x: np.reshape(
                 np.moveaxis(x, keep_axis, 0),
                 (x.shape[keep_axis], -1, x.shape[-1]),
             ),
-            vars_,
+            vars_unwrapped,
+            is_leaf=is_leaf_ma,
         )
 
     if colors is None:
@@ -186,9 +212,10 @@ def profiles(
         fig.add_traces(traces)
         return fig
 
+    # Treat MaskedArray as a leaf and tuples as leaves when flattening for plotting
     plot_data = jt.leaves(
-        tree_zip(vars_flat, means, ubs, lbs, timesteps, labels),
-        is_leaf=lambda x: isinstance(x, tuple),
+        tree_zip(vars_flat, means, ubs, lbs, timesteps, labels, is_leaf=is_leaf_ma),
+        is_leaf=lambda x: isinstance(x, tuple) or isinstance(x, MaskedArray),
     )
 
     for i, (var_flat, means_i, ubs_i, lbs_i, ts, label) in enumerate(plot_data):
